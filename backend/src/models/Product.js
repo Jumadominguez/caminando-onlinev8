@@ -4,7 +4,6 @@ const carrefourProductSchema = new mongoose.Schema({
   // Información básica del producto
   name: {
     type: String,
-    required: [true, 'Product name is required'],
     trim: true,
     maxlength: [200, 'Name cannot exceed 200 characters'],
   },
@@ -12,9 +11,7 @@ const carrefourProductSchema = new mongoose.Schema({
   // Identificadores únicos
   sku: {
     type: String,
-    required: [true, 'SKU is required'],
     trim: true,
-    unique: true,
   },
   mpn: {
     type: String,
@@ -32,20 +29,26 @@ const carrefourProductSchema = new mongoose.Schema({
   // Marca y fabricante
   brand: {
     type: String,
-    required: [true, 'Brand is required'],
     trim: true,
   },
 
   // Precio y moneda
   price: {
     type: Number,
-    required: [true, 'Price is required'],
     min: [0, 'Price cannot be negative'],
   },
   currency: {
     type: String,
     default: 'ARS',
     enum: ['ARS', 'USD'],
+  },
+  sellingPrice: {
+    type: Number,
+    min: [0, 'Selling price cannot be negative'],
+  },
+  listPrice: {
+    type: Number,
+    min: [0, 'List price cannot be negative'],
   },
   pricePerUnit: {
     type: Number,
@@ -59,7 +62,6 @@ const carrefourProductSchema = new mongoose.Schema({
   // Categorización jerárquica
   category: {
     type: String,
-    required: [true, 'Category is required'],
     trim: true,
   },
   subcategory: {
@@ -112,8 +114,8 @@ const carrefourProductSchema = new mongoose.Schema({
   // Información del vendedor
   seller: {
     type: String,
-    default: 'Carrefour',
     enum: ['Carrefour'],
+    default: 'Carrefour',
   },
 
   // Condición del producto
@@ -226,7 +228,7 @@ const carrefourProductSchema = new mongoose.Schema({
 });
 
 // Índices para optimización de consultas
-carrefourProductSchema.index({ sku: 1 }, { unique: true });
+carrefourProductSchema.index({ sku: 1 });
 carrefourProductSchema.index({ name: 1 });
 carrefourProductSchema.index({ brand: 1 });
 carrefourProductSchema.index({ category: 1 });
