@@ -57,11 +57,11 @@ jspm_packages/
 # dotenv environment variables file
 .env
 
-# Sandbox temp files
+# Sandbox temp files (according to global instructions)
 Sandbox/Debug/
 Sandbox/temps/
 
-# Python (if any)
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -75,3 +75,6 @@ venv.bak/
 
 # MongoDB data (if local)
 data/db/
+
+# Tests (if not needed in version control)
+tests/

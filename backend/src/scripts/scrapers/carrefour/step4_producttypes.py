@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Script para procesar la primera categoría de Carrefour desde la base de datos
-SIGUIENDO INSTRUCCIONES EXACTAS DEL USUARIO
+Script para procesar la primera categoría de Carrefour siguiendo las instrucciones detalladas
+Basado en el proceso documentado en proceso-detallado-carrefour-step4.md
 """
 import time
 import logging
@@ -64,51 +64,61 @@ def scroll_to_load_filters(driver):
     time.sleep(3)
     logging.info("Scrolled down to load filters")
 
-def get_category_by_index(index=0):
-    """Get a category from MongoDB categories collection by index (0-based)"""
+def get_all_categories():
+    """Get all categories from MongoDB categories collection"""
     try:
         client = MongoClient('mongodb://localhost:27017/')
         db = client['carrefour']
         collection = db['categories']
 
-        # Get all categories sorted by some criteria (you might want to sort by name or _id)
-        categories = list(collection.find({}, {'name': 1, 'url': 1, '_id': 0}).sort([('_id', 1)]))
+        # Get all categories sorted by _id
+        categories = list(collection.find({}, {'name': 1, 'url': 1, '_id': 0}, sort=[('_id', 1)]))
 
         client.close()
 
-        if categories and index < len(categories):
-            category = categories[index]
-            logging.info(f"✓ Retrieved category #{index + 1} from database: {category.get('name')} -> {category.get('url')}")
-            return category
+        if categories:
+            logging.info(f"✓ Retrieved {len(categories)} categories from database:")
+            for i, cat in enumerate(categories, 1):
+                logging.info(f"  {i}. {cat.get('name')} -> {cat.get('url')}")
+            return categories
         else:
-            logging.error(f"No category found at index {index}. Total categories: {len(categories) if categories else 0}")
-            return None
+            logging.error("No categories found in database")
+            return []
 
     except Exception as e:
-        logging.error(f"Error retrieving category at index {index} from database: {e}")
-        return None
-
-def get_first_category():
-    """Get the first category from MongoDB categories collection (backward compatibility)"""
-    return get_category_by_index(0)
-
-def get_second_category():
-    """Get the second category from MongoDB categories collection"""
-    return get_category_by_index(1)
+        logging.error(f"Error retrieving categories from database: {e}")
+        return []
 
 def expand_subcategory_menu_if_collapsed(driver):
     """Revisar si el menú de Sub-Categoría está colapsado y expandirlo si es necesario"""
     try:
-        # Find the subcategory container
-        subcategory_container = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-filter__container--category-3"))
-        )
-        logging.info("Found subcategory container")
+        # Find the subcategory container with multiple selectors for robustness
+        subcategory_container = None
+        selectors = [
+            "div.valtech-carrefourar-search-result-3-x-filter__container--category-3",
+            "div[data-testid*='category']",
+            "div.filter__container--category"
+        ]
+
+        for selector in selectors:
+            try:
+                subcategory_container = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                if subcategory_container:
+                    logging.info(f"Found subcategory container with selector: {selector}")
+                    break
+            except:
+                continue
+
+        if not subcategory_container:
+            logging.error("No subcategory container found with any selector")
+            return None
 
         # Check if there's an expand button (role='button')
         try:
             expand_button = subcategory_container.find_element(By.CSS_SELECTOR, "div[role='button']")
-            if expand_button.is_displayed():
+            if expand_button and expand_button.is_displayed():
                 driver.execute_script("arguments[0].scrollIntoView();", expand_button)
                 time.sleep(1)
                 driver.execute_script("arguments[0].click();", expand_button)
@@ -126,7 +136,7 @@ def expand_subcategory_menu_if_collapsed(driver):
         return None
 
 def scroll_and_click_ver_mas_subcategories(driver, subcategory_container):
-    """Hacer scroll hasta el final del menú Sub-Categoría y encontrar botón 'Ver más N'"""
+    """Hacer scroll hasta el final del menú Sub-Categoría y encontrar botón 'Ver más N' y darle click"""
     try:
         # Scroll to the bottom of the container
         driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", subcategory_container)
@@ -172,110 +182,101 @@ def scroll_and_click_ver_mas_subcategories(driver, subcategory_container):
         logging.error(f"Error scrolling and clicking 'Ver más' for subcategories: {e}")
         return False
 
-def select_first_subcategory_and_apply(driver, subcategory_container):
-    """Seleccionar la primera subcategoría y hacer click en 'Aplicar' - VALIDAR SELECCIÓN ÚNICA"""
+def count_all_product_types(driver):
+    """Contar TODOS los tipos de producto expandiendo completamente el filtro primero"""
     try:
-        # Find all subcategory checkboxes
-        checkboxes = subcategory_container.find_elements(By.CSS_SELECTOR, "input[type='checkbox'][id^='category-3-']")
+        # Forzar una recarga completa: colapsar y expandir el menú de tipos de producto
+        logging.info("Forzando recarga completa del menú de tipos de producto...")
 
-        if not checkboxes:
-            logging.error("No subcategory checkboxes found")
-            return False, None
+        # Primero intentar colapsar el menú si está expandido
+        try:
+            product_type_header = driver.find_element(By.CSS_SELECTOR, "[data-testid*='product-type'], .valtech-carrefourar-search-result-3-x-filterItem")
+            if product_type_header:
+                # Hacer click para colapsar si está expandido
+                driver.execute_script("arguments[0].click();", product_type_header)
+                time.sleep(2)
+                logging.info("✓ Collapsed product types menu for fresh reload")
+        except:
+            logging.debug("Could not collapse product types menu")
 
-        # VALIDACIÓN: Verificar que no haya más de 1 subcategoría seleccionada
-        selected_checkboxes = []
-        for checkbox in checkboxes:
-            if checkbox.is_selected():
-                selected_checkboxes.append(checkbox)
+        # Ahora expandir completamente el menú de tipos de producto
+        product_types_container = expand_product_type_menu(driver)
+        if not product_types_container:
+            logging.error("No se pudo expandir el menú de tipos de producto para contar")
+            return 0
 
-        if len(selected_checkboxes) > 1:
-            logging.warning(f"⚠️  Encontradas {len(selected_checkboxes)} subcategorías seleccionadas. Deseleccionando todas excepto la primera...")
-            # Deseleccionar todas las checkboxes seleccionadas
-            for checkbox in selected_checkboxes:
-                driver.execute_script("arguments[0].click();", checkbox)
-                time.sleep(0.5)
-            logging.info("✓ Deseleccionadas todas las subcategorías previamente seleccionadas")
+        # Esperar un poco más para que se carguen dinámicamente los elementos
+        time.sleep(3)
 
-        # Select the first subcategory (index 0)
-        first_checkbox = checkboxes[0]
+        # Hacer click en "ver más" si existe para expandir completamente
+        # Intentar múltiples veces con scrolls adicionales
+        for attempt in range(3):
+            logging.info(f"Attempting to find 'Ver más' button (attempt {attempt + 1}/3)...")
+            if scroll_and_click_ver_mas_product_types(driver, product_types_container):
+                # Si se encontró y clickeó, esperar un poco más
+                time.sleep(2)
+                break
 
-        # Verificar si ya está seleccionada
-        if first_checkbox.is_selected():
-            logging.info("La primera subcategoría ya está seleccionada")
-        else:
-            # Get subcategory name from label
-            input_id = first_checkbox.get_attribute("id")
-            try:
-                label = driver.find_element(By.CSS_SELECTOR, f"label[for='{input_id}']")
-                subcategory_name = label.get_attribute("textContent").strip()
-                subcategory_name = subcategory_name.split('(')[0].strip()  # Remove count if present
-            except:
-                subcategory_name = f"Subcategory_{input_id}"
+            # Si no se encontró, hacer otro scroll y esperar
+            driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", product_types_container)
+            time.sleep(2)
 
-            # Scroll to and click the checkbox
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", first_checkbox)
-            time.sleep(1)
-            driver.execute_script("arguments[0].click();", first_checkbox)
-            logging.info(f"✓ Selected first subcategory: {subcategory_name}")
-        
+        # Ahora contar todos los checkboxes disponibles
+        return count_product_types(driver)
 
-        # Find and click the "Aplicar" button
-        aplicar_selectors = [
-            "div.vtex-button__label",
-            "button[class*='Aplicar']",
-            "button:contains('Aplicar')",
-            "//button[contains(text(), 'Aplicar')]",
-            "//div[contains(text(), 'Aplicar')]",
-            "//span[contains(text(), 'Aplicar')]"
+    except Exception as e:
+        logging.error(f"Error counting all product types: {e}")
+        return 0
+
+def count_product_types(driver):
+    """Contar el número total de opciones en el filtro 'Tipo de Producto'"""
+    try:
+        # Find the product types container
+        product_types_container = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-filter__container--tipo-de-producto"))
+        )
+
+        # Try multiple selectors for product type checkboxes
+        checkbox_selectors = [
+            "input[type='checkbox'][id^='tipo-de-producto-']",
+            "input[type='checkbox']",
+            ".valtech-carrefourar-search-result-3-x-filter__checkbox input[type='checkbox']",
+            "input[id*='tipo-de-producto']"
         ]
 
-        for selector in aplicar_selectors:
+        checkboxes = []
+        for selector in checkbox_selectors:
             try:
-                if selector.startswith("//"):
-                    elements = driver.find_elements(By.XPATH, selector)
-                else:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-
-                for element in elements:
-                    text = element.text.lower()
-                    if "aplicar" in text:
-                        driver.execute_script("arguments[0].scrollIntoView();", element)
-                        time.sleep(1)
-                        driver.execute_script("arguments[0].click();", element)
-                        logging.info("✓ Clicked 'Aplicar' button")
-                        # ESPERAR MÁS TIEMPO para que se carguen dinámicamente los filtros correctos
-                        logging.info("⏳ Esperando que se carguen dinámicamente los filtros después de aplicar subcategoría...")
-                        time.sleep(15)  # Aumentado a 15 segundos para asegurar carga completa de filtros
-                        logging.info("✓ Filtros deberían estar cargados dinámicamente")
-                        return True, subcategory_name
-
+                elements = product_types_container.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    checkboxes = elements
+                    break
             except Exception as e:
                 logging.debug(f"Selector {selector} failed: {e}")
                 continue
 
-        logging.error("Could not find 'Aplicar' button")
-        return False, None
+        count = len(checkboxes)
+        logging.info(f"✓ Counted {count} product type options")
+        return count
 
     except Exception as e:
-        logging.error(f"Error selecting first subcategory and applying: {e}")
-        return False, None
+        logging.error(f"Error counting product types: {e}")
+        return 0
 
 def process_all_subcategories(driver, category_name, category_url):
     """Procesar todas las subcategorías de una categoría, extrayendo tipos de producto para cada una"""
     try:
-        # Expandir menú de subcategorías si está colapsado
+        # NO guardamos las checkboxes al inicio porque se vuelven stale después del refresh
+        # En su lugar, las obtendremos en cada iteración después del refresh
+
+        # Obtener el número total de subcategorías UNA SOLA VEZ al inicio
         subcategory_container = expand_subcategory_menu_if_collapsed(driver)
         if not subcategory_container:
             logging.error("No se pudo encontrar el contenedor de subcategorías")
             return False
 
-        # Obtener todas las subcategorías disponibles
-        checkboxes = subcategory_container.find_elements(By.CSS_SELECTOR, "input[type='checkbox'][id^='category-3-']")
-        if not checkboxes:
-            logging.error("No se encontraron checkboxes de subcategorías")
-            return False
-
-        total_subcategories = len(checkboxes)
+        temp_checkboxes = subcategory_container.find_elements(By.CSS_SELECTOR, "input[type='checkbox'][id^='category-3-']")
+        total_subcategories = len(temp_checkboxes)
         logging.info(f"✓ Encontradas {total_subcategories} subcategorías para procesar")
 
         # Procesar cada subcategoría
@@ -283,6 +284,17 @@ def process_all_subcategories(driver, category_name, category_url):
             logging.info(f"{'='*50}")
             logging.info(f"PROCESANDO SUBCATEGORÍA {subcategory_index + 1}/{total_subcategories}")
             logging.info(f"{'='*50}")
+
+            # DESPUÉS DE CADA REFRESH: VOLVER A OBTENER LAS CHECKBOXES DEL DOM ACTUALIZADO
+            subcategory_container = expand_subcategory_menu_if_collapsed(driver)
+            if not subcategory_container:
+                logging.warning(f"No se pudo re-expandir el menú de subcategorías para subcategoría {subcategory_index + 1}")
+                continue
+
+            checkboxes = subcategory_container.find_elements(By.CSS_SELECTOR, "input[type='checkbox'][id^='category-3-']")
+            if subcategory_index >= len(checkboxes):
+                logging.warning(f"No se pudo acceder a la subcategoría {subcategory_index + 1} (índice fuera de rango)")
+                continue
 
             # Limpiar cualquier selección previa
             logging.info("Limpiando selecciones previas...")
@@ -337,10 +349,14 @@ def process_all_subcategories(driver, category_name, category_url):
                             time.sleep(1)
                             driver.execute_script("arguments[0].click();", element)
                             logging.info("✓ Filtro aplicado")
-                            # ESPERAR MÁS TIEMPO para que se carguen dinámicamente los filtros correctos
                             logging.info("⏳ Esperando que se carguen dinámicamente los filtros después de aplicar subcategoría...")
-                            time.sleep(15)  # Aumentado a 15 segundos para asegurar carga completa de filtros
-                            logging.info("✓ Filtros deberían estar cargados dinámicamente")
+                            time.sleep(3)  # Reducido a 3 segundos como indica el .md
+
+                            # Usar la función segura para refresh y reabrir filtros
+                            if not safe_refresh_and_reopen_filters(driver):
+                                logging.error(f"No se pudo refrescar y reabrir filtros para subcategoría '{subcategory_name}'")
+                                continue
+
                             filter_applied = True
                             break
                     if filter_applied:
@@ -389,19 +405,74 @@ def process_all_subcategories(driver, category_name, category_url):
         logging.error(f"Error procesando subcategorías: {e}")
         return False
 
+def safe_refresh_and_reopen_filters(driver, max_retries=3):
+    """Función segura para refrescar página y reabrir filtros con reintentos"""
+    for attempt in range(max_retries):
+        try:
+            logging.info(f"✓ Actualizando página después de aplicar filtro (intento {attempt + 1}/{max_retries})...")
+            driver.refresh()
+            time.sleep(5)  # Esperar más tiempo para que se recargue completamente
+            logging.info("✓ Página actualizada - filtros deberían estar cargados dinámicamente")
+
+            # Reabrir panel de filtros después del refresh
+            logging.info("⏳ Reabriendo panel de filtros después del refresh...")
+            open_filters_panel(driver)
+            scroll_to_load_filters(driver)
+
+            # Re-expandir el menú de subcategorías después del refresh
+            subcategory_container = expand_subcategory_menu_if_collapsed(driver)
+            if subcategory_container:
+                scroll_and_click_ver_mas_subcategories(driver, subcategory_container)
+                return True
+            else:
+                logging.warning(f"Intento {attempt + 1}: No se pudo re-expandir menú de subcategorías")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return False
+
+        except Exception as e:
+            logging.warning(f"Intento {attempt + 1} falló: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            return False
+
+    return False
+
 def expand_product_type_menu(driver):
     """Buscar el menú 'Tipo de Producto' en el contenedor de filtros y expandirlo"""
     try:
-        # Find the product types container
-        product_types_container = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-filter__container--tipo-de-producto"))
-        )
-        logging.info("Found product types container")
+        # Find the product types container with multiple selectors for robustness
+        product_types_container = None
+        selectors = [
+            "div.valtech-carrefourar-search-result-3-x-filter__container--tipo-de-producto",
+            "div[data-testid*='tipo-de-producto']",
+            "div.filter__container--tipo-de-producto",
+            "div.valtech-carrefourar-search-result-3-x-filter__container"
+        ]
+
+        for selector in selectors:
+            try:
+                product_types_container = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                # Verify it contains product type elements
+                checkboxes = product_types_container.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+                if checkboxes:
+                    logging.info(f"Found product types container with selector: {selector} ({len(checkboxes)} checkboxes)")
+                    break
+            except:
+                continue
+
+        if not product_types_container:
+            logging.error("No product types container found with any selector")
+            return None
 
         # Check if there's an expand button
         try:
             expand_button = product_types_container.find_element(By.CSS_SELECTOR, "div[role='button']")
-            if expand_button.is_displayed():
+            if expand_button and expand_button.is_displayed():
                 driver.execute_script("arguments[0].scrollIntoView();", expand_button)
                 time.sleep(1)
                 driver.execute_script("arguments[0].click();", expand_button)
@@ -465,141 +536,6 @@ def scroll_and_click_ver_mas_product_types(driver, product_types_container):
     except Exception as e:
         logging.error(f"Error scrolling and clicking 'Ver más' for product types: {e}")
         return False
-
-def count_product_types(driver):
-    """Contar el número total de opciones en el filtro 'Tipo de Producto'"""
-    try:
-        # Find the product types container
-        product_types_container = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-filter__container--tipo-de-producto"))
-        )
-
-        # Try multiple selectors for product type checkboxes
-        checkbox_selectors = [
-            "input[type='checkbox'][id^='tipo-de-producto-']",
-            "input[type='checkbox']",
-            ".valtech-carrefourar-search-result-3-x-filter__checkbox input[type='checkbox']",
-            "input[id*='tipo-de-producto']"
-        ]
-
-        checkboxes = []
-        for selector in checkbox_selectors:
-            try:
-                elements = product_types_container.find_elements(By.CSS_SELECTOR, selector)
-                if elements:
-                    checkboxes = elements
-                    break
-            except Exception as e:
-                logging.debug(f"Selector {selector} failed: {e}")
-                continue
-
-        count = len(checkboxes)
-        logging.info(f"✓ Counted {count} product type options")
-        return count
-
-    except Exception as e:
-        logging.error(f"Error counting product types: {e}")
-        return 0
-
-def count_all_product_types(driver):
-    """Contar TODOS los tipos de producto expandiendo completamente el filtro primero"""
-    try:
-        # Forzar una recarga completa: colapsar y expandir el menú de tipos de producto
-        logging.info("Forzando recarga completa del menú de tipos de producto...")
-
-        # Primero intentar colapsar el menú si está expandido
-        try:
-            product_type_header = driver.find_element(By.CSS_SELECTOR, "[data-testid*='product-type'], .valtech-carrefourar-search-result-3-x-filterItem")
-            if product_type_header:
-                # Hacer click para colapsar si está expandido
-                driver.execute_script("arguments[0].click();", product_type_header)
-                time.sleep(2)
-                logging.info("✓ Collapsed product types menu for fresh reload")
-        except:
-            logging.debug("Could not collapse product types menu")
-
-        # Ahora expandir completamente el menú de tipos de producto
-        product_types_container = expand_product_type_menu(driver)
-        if not product_types_container:
-            logging.error("No se pudo expandir el menú de tipos de producto para contar")
-            return 0
-
-        # Esperar un poco más para que se carguen dinámicamente los elementos
-        time.sleep(3)
-
-        # Hacer click en "ver más" si existe para expandir completamente
-        # Intentar múltiples veces con scrolls adicionales
-        for attempt in range(3):
-            logging.info(f"Attempting to find 'Ver más' button (attempt {attempt + 1}/3)...")
-            if scroll_and_click_ver_mas_product_types(driver, product_types_container):
-                # Si se encontró y clickeó, esperar un poco más
-                time.sleep(2)
-                break
-
-            # Si no se encontró, hacer otro scroll y esperar
-            driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", product_types_container)
-            time.sleep(2)
-
-        # Ahora contar todos los checkboxes disponibles
-        return count_product_types(driver)
-
-    except Exception as e:
-        logging.error(f"Error counting all product types: {e}")
-        return 0
-
-def save_product_type_to_db(product_type_name, subcategory_name, category_name, category_url):
-    """Save or update the product type to MongoDB producttypes collection (avoid duplicates)"""
-    try:
-        client = MongoClient('mongodb://localhost:27017/')
-        db = client['carrefour']
-        collection = db['producttypes']
-
-        # Create simplified name (name is already cleaned in extract_product_type_names)
-        simplified_name = product_type_name
-
-        # Use upsert to replace if exists or insert if not
-        filter_query = {
-            'name': product_type_name,
-            'subcategory': subcategory_name,
-            'category': category_name
-        }
-
-        document = {
-            'name': product_type_name,
-            'simplified_name': simplified_name,
-            'subcategory': subcategory_name,
-            'category': category_name,
-            'category_url': category_url,
-            'extracted_at': datetime.now(),
-            'source': 'carrefour_step4_exact_instructions.py'
-        }
-
-        result = collection.update_one(filter_query, {'$set': document}, upsert=True)
-        if result.upserted_id:
-            logging.info(f"✓ Inserted new product type '{product_type_name}' to database (ID: {result.upserted_id})")
-        else:
-            logging.info(f"✓ Updated existing product type '{product_type_name}' in database")
-
-        client.close()
-        return True
-
-    except Exception as e:
-        logging.error(f"Error saving/updating product type to database: {e}")
-        return False
-
-def save_product_types_to_db(product_type_names, category_name, subcategory_name, category_url):
-    """Save multiple product types to database, returning count of successfully saved items"""
-    if not product_type_names:
-        logging.warning("No product type names to save")
-        return 0
-
-    saved_count = 0
-    for product_type_name in product_type_names:
-        if save_product_type_to_db(product_type_name, subcategory_name, category_name, category_url):
-            saved_count += 1
-
-    logging.info(f"✓ Successfully saved {saved_count} out of {len(product_type_names)} product types to database")
-    return saved_count
 
 def extract_product_type_names(driver):
     """Extraer los nombres de todos los tipos de producto disponibles"""
@@ -668,64 +604,149 @@ def extract_product_type_names(driver):
         logging.error(f"Error extracting product type names: {e}")
         return []
 
+def save_product_type_to_db(product_type_name, subcategory_name, category_name, category_url):
+    """Save or update the product type to MongoDB producttypes collection (avoid duplicates)"""
+    try:
+        client = MongoClient('mongodb://localhost:27017/')
+        db = client['carrefour']
+        collection = db['producttypes']
+
+        # Create simplified name (name is already cleaned in extract_product_type_names)
+        simplified_name = product_type_name
+
+        # Use upsert to replace if exists or insert if not
+        filter_query = {
+            'name': product_type_name,
+            'subcategory': subcategory_name,
+            'category': category_name
+        }
+
+        document = {
+            'name': product_type_name,
+            'simplified_name': simplified_name,
+            'subcategory': subcategory_name,
+            'category': category_name,
+            'category_url': category_url,
+            'extracted_at': datetime.now(),
+            'source': 'carrefour_step4_md_instructions.py'
+        }
+
+        result = collection.update_one(filter_query, {'$set': document}, upsert=True)
+        if result.upserted_id:
+            logging.info(f"✓ Inserted new product type '{product_type_name}' to database (ID: {result.upserted_id})")
+        else:
+            logging.info(f"✓ Updated existing product type '{product_type_name}' in database")
+
+        client.close()
+        return True
+
+    except Exception as e:
+        logging.error(f"Error saving/updating product type to database: {e}")
+        return False
+
+def save_product_types_to_db(product_type_names, category_name, subcategory_name, category_url):
+    """Save multiple product types to database, returning count of successfully saved items"""
+    if not product_type_names:
+        logging.warning("No product type names to save")
+        return 0
+
+    saved_count = 0
+    for product_type_name in product_type_names:
+        if save_product_type_to_db(product_type_name, subcategory_name, category_name, category_url):
+            saved_count += 1
+
+    logging.info(f"✓ Successfully saved {saved_count} out of {len(product_type_names)} product types to database")
+    return saved_count
+
 def main():
-    """Main function following exact user instructions"""
+    """Main function following the detailed process from the .md file - processes ALL categories"""
     driver = None
 
     try:
-        logging.info("=== INICIANDO SCRIPT SEGÚN INSTRUCCIONES EXACTAS ===")
+        logging.info("=== INICIANDO SCRIPT PARA PROCESAR TODAS LAS CATEGORÍAS ===")
 
-        # 1. Revisar las categorías en la colección categories de la base de datos carrefour
-        logging.info("PASO 1: Revisando categorías en base de datos...")
-        category = get_first_category()
-        if not category:
-            logging.error("No se pudo obtener la primera categoría")
-            return
-
-        category_name = category.get('name')
-        category_url = category.get('url')
-
-        # 2. Entrar a la primera categoría
-        logging.info(f"PASO 2: Entrando a la primera categoría: {category_name}")
+        # PASO 1: Inicialización y Configuración
+        logging.info("PASO 1: Inicialización y Configuración del WebDriver Firefox...")
         driver = setup_driver()
-        driver.get(category_url)
-        time.sleep(5)
 
-        # Handle cookies
-        handle_cookies(driver)
-
-        # Open filters panel
-        open_filters_panel(driver)
-
-        # Scroll to load filters
-        scroll_to_load_filters(driver)
-
-        # 3. Revisar si el menú de Sub-Categoría está colapsado y expandirlo si es necesario
-        logging.info("PASO 3: Revisando si menú Sub-Categoría está colapsado...")
-        subcategory_container = expand_subcategory_menu_if_collapsed(driver)
-        if not subcategory_container:
-            logging.error("No se pudo encontrar el contenedor de subcategorías")
+        # PASO 2: Obtención de TODAS las Categorías desde Base de Datos
+        logging.info("PASO 2: Obtención de TODAS las Categorías desde Base de Datos...")
+        categories = get_all_categories()
+        if not categories:
+            logging.error("No se pudieron obtener las categorías")
             return
 
-        # 4. Hacer scroll hasta el final del menú "Sub-Categoría" hasta encontrar el botón "Ver más N" y darle click
-        logging.info("PASO 4: Scrolleando hasta final de Sub-Categoría y buscando botón 'Ver más N'...")
-        scroll_and_click_ver_mas_subcategories(driver, subcategory_container)
+        total_categories = len(categories)
+        logging.info(f"{'='*60}")
+        logging.info(f"INICIANDO PROCESAMIENTO DE {total_categories} CATEGORÍAS")
+        logging.info(f"{'='*60}")
 
-        # PASO EXTRA: Antes de seleccionar subcategoría, contar TODOS los tipos de producto (expandiendo completamente)
-        logging.info("PASO EXTRA: Contando TODOS los tipos de producto totales (sin filtro de subcategoría)...")
-        total_product_types_before = count_all_product_types(driver)
-        logging.info(f"Total product types before filtering (fully expanded): {total_product_types_before}")
+        # Procesar cada categoría (SALTANDO LAS PRIMERAS 2 CATEGORÍAS QUE YA FUERON PROCESADAS)
+        for category_index, category in enumerate(categories, 1):
+            category_name = category.get('name')
+            category_url = category.get('url')
 
-        # 5. Procesar TODAS las subcategorías de la categoría
-        logging.info("PASO 5: Procesando TODAS las subcategorías de la categoría...")
-        success = process_all_subcategories(driver, category_name, category_url)
-        if not success:
-            logging.error("No se pudieron procesar las subcategorías")
-            return
+            # SALTAR LAS PRIMERAS 2 CATEGORÍAS QUE YA FUERON PROCESADAS
+            if category_index <= 2:
+                logging.info(f"⏭️  SALTANDO CATEGORÍA {category_index}/{total_categories}: {category_name} (YA PROCESADA)")
+                continue
+
+            logging.info(f"{'='*80}")
+            logging.info(f"PROCESANDO CATEGORÍA {category_index}/{total_categories}: {category_name}")
+            logging.info(f"{'='*80}")
+
+            try:
+                # PASO 3: Navegación a la Categoría
+                logging.info(f"PASO 3: Navegación a la Categoría '{category_name}'...")
+                driver.get(category_url)
+                time.sleep(5)
+
+                # Handle cookies (solo en la primera categoría)
+                if category_index == 1:
+                    handle_cookies(driver)
+
+                # PASO 4: Apertura del Panel de Filtros
+                logging.info("PASO 4: Apertura del Panel de Filtros...")
+                open_filters_panel(driver)
+
+                # PASO 5: Carga de Filtros
+                logging.info("PASO 5: Carga de Filtros...")
+                scroll_to_load_filters(driver)
+
+                # PASO 6: Expansión del Menú de Subcategorías
+                logging.info("PASO 6: Expansión del Menú de Subcategorías...")
+                subcategory_container = expand_subcategory_menu_if_collapsed(driver)
+                if not subcategory_container:
+                    logging.error(f"No se pudo encontrar el contenedor de subcategorías para '{category_name}'")
+                    continue
+
+                # PASO 7: Expansión Completa de Subcategorías
+                logging.info("PASO 7: Expansión Completa de Subcategorías (Ver más)...")
+                scroll_and_click_ver_mas_subcategories(driver, subcategory_container)
+
+                # PASO 8: Conteo de Tipos de Producto Totales
+                logging.info("PASO 8: Conteo de Tipos de Producto Totales (antes de filtrar)...")
+                total_product_types_before = count_all_product_types(driver)
+                logging.info(f"Total product types before filtering: {total_product_types_before}")
+
+                # PASO 9: Procesamiento de Todas las Subcategorías
+                logging.info("PASO 9: Procesamiento de Todas las Subcategorías...")
+                success = process_all_subcategories(driver, category_name, category_url)
+                if not success:
+                    logging.error(f"No se pudieron procesar las subcategorías para '{category_name}'")
+                    continue
+
+                logging.info(f"{'='*60}")
+                logging.info(f"✓ CATEGORÍA {category_index}/{total_categories} COMPLETADA: {category_name}")
+                logging.info(f"{'='*60}")
+
+            except Exception as e:
+                logging.error(f"Error procesando categoría '{category_name}': {e}")
+                # Continuar con la siguiente categoría en caso de error
+                continue
 
         logging.info("=== PROCESO COMPLETADO EXITOSAMENTE ===")
-        logging.info(f"Categoría procesada: {category_name}")
-        logging.info("Todas las subcategorías han sido procesadas y sus tipos de producto guardados")
+        logging.info(f"Todas las {total_categories} categorías han sido procesadas")
         logging.info("El navegador permanecerá abierto para que puedas ver el resultado")
 
         # Keep browser open for 30 seconds so user can see the result
