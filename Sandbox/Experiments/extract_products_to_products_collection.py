@@ -9,6 +9,7 @@ import logging
 import json
 import os
 import random
+import re
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
@@ -360,8 +361,154 @@ def apply_filter(driver):
         logging.error(f"Error applying filter: {e}")
         return False
 
-def extract_products(driver, product_type_name, category_name):
-    """Extraer productos de la página filtrada"""
+# Global cache for brands to avoid repeated database queries
+BRANDS_CACHE = None
+
+def extract_brand(product_name):
+    """Extrae la marca del nombre del producto buscando en la colección filters"""
+    global BRANDS_CACHE
+
+    # Cargar marcas de la base de datos si no están en cache
+    if BRANDS_CACHE is None:
+        try:
+            # Obtener todas las marcas de la colección filters
+            client = MongoClient('mongodb://localhost:27017/')
+            db = client['carrefour']
+            filters_collection = db['filters']
+            brands_docs = filters_collection.find({'type': 'brand'}, {'name': 1})
+            BRANDS_CACHE = [doc['name'] for doc in brands_docs]
+            client.close()
+            logging.info(f"Cargadas {len(BRANDS_CACHE)} marcas desde la base de datos")
+        except Exception as e:
+            logging.error(f"Error cargando marcas desde la base de datos: {e}")
+            BRANDS_CACHE = []
+
+    # Buscar coincidencia exacta primero
+    product_name_lower = product_name.lower()
+    for brand in BRANDS_CACHE:
+        if brand.lower() == product_name_lower:
+            return brand
+
+    # Buscar marca contenida en el nombre del producto
+    for brand in BRANDS_CACHE:
+        if brand.lower() in product_name_lower:
+            return brand
+
+    # Si no encuentra marca conocida, intentar extraer de las primeras palabras
+    words = product_name.split()
+    if words:
+        # Probar con las primeras 2-3 palabras para encontrar marcas compuestas
+        for i in range(min(3, len(words))):
+            candidate = ' '.join(words[:i+1])
+            for brand in BRANDS_CACHE:
+                if brand.lower() == candidate.lower():
+                    return brand
+
+    # Fallback: devolver 'Carrefour' para productos de marca propia
+    return 'Carrefour'
+
+# Global cache for product types to avoid repeated database queries
+PRODUCT_TYPES_CACHE = None
+
+def parse_argentine_price(price_text):
+    """Parse Argentine price format ($X.XXX,XX or X.XXX,XX) to float"""
+    try:
+        if not price_text:
+            return None
+
+        # Remove currency symbols and clean up spaces
+        clean_text = price_text.replace('$', '').replace('ARS', '').strip()
+
+        # Remove extra spaces that might be in the extracted text
+        clean_text = ' '.join(clean_text.split())
+
+        # Handle the specific format from currencyContainer: "140 . 000 , 00"
+        # Remove spaces and reconstruct the number
+        parts = clean_text.split()
+        if len(parts) >= 1:
+            # Join all parts and remove spaces
+            clean_text = ''.join(parts)
+
+        # Handle Argentine format: X.XXX,XX -> XXXX.XX
+        if ',' in clean_text and '.' in clean_text:
+            # Remove dots (thousands separators) and replace comma with dot
+            clean_text = clean_text.replace('.', '').replace(',', '.')
+        elif ',' in clean_text:
+            # Only comma (decimal separator)
+            clean_text = clean_text.replace(',', '.')
+
+        return float(clean_text)
+    except (ValueError, AttributeError) as e:
+        logging.debug(f"Error parsing price '{price_text}': {e}")
+        return None
+
+def extract_price_from_currency_container(container_element):
+    """Extract complete price from a currency container with multiple spans"""
+    try:
+        # First try: get the complete text from the container element
+        complete_text = container_element.text.strip()
+        if complete_text and ('$' in complete_text or 'ARS' in complete_text):
+            return complete_text
+
+        # Fallback: try to extract from individual spans
+        spans = container_element.find_elements(By.XPATH, './/span[contains(@class, "valtech-carrefourar-product-price-0-x-")]')
+        price_parts = []
+
+        for span in spans:
+            classes = span.get_attribute('class')
+            text = span.text.strip()
+
+            if 'currencyCode' in classes:
+                price_parts.append(text)      # Currency symbol: "$"
+            elif 'currencyInteger' in classes:
+                price_parts.append(text)      # Integer part: "1.234"
+            elif 'currencyGroup' in classes:
+                price_parts.append(text)      # Thousands separator: "."
+            elif 'currencyDecimal' in classes:
+                price_parts.append(text)      # Decimal separator: ","
+            elif 'currencyFraction' in classes:
+                price_parts.append(text)      # Decimal part: "56"
+
+        result = ''.join(price_parts)
+        return result if result else None
+    except Exception as e:
+        logging.error(f"Error extracting price from currency container: {e}")
+        return None
+
+def extract_subcategory(product_type_name):
+    """Extrae la subcategoría del tipo de producto buscando en la colección producttypes"""
+    global PRODUCT_TYPES_CACHE
+
+    # Cargar tipos de producto de la base de datos si no están en cache
+    if PRODUCT_TYPES_CACHE is None:
+        try:
+            # Obtener todos los tipos de producto con su subcategoría
+            client = MongoClient('mongodb://localhost:27017/')
+            db = client['carrefour']
+            producttypes_collection = db['producttypes']
+            producttypes_docs = producttypes_collection.find({}, {'name': 1, 'subcategory': 1})
+            PRODUCT_TYPES_CACHE = {doc['name']: doc.get('subcategory') for doc in producttypes_docs}
+            client.close()
+            logging.info(f"Cargados {len(PRODUCT_TYPES_CACHE)} tipos de producto desde la base de datos")
+        except Exception as e:
+            logging.error(f"Error cargando tipos de producto desde la base de datos: {e}")
+            PRODUCT_TYPES_CACHE = {}
+
+    # Buscar coincidencia exacta del tipo de producto
+    if product_type_name in PRODUCT_TYPES_CACHE:
+        return PRODUCT_TYPES_CACHE[product_type_name]
+
+    # Buscar coincidencia parcial (contenida)
+    product_type_lower = product_type_name.lower()
+    for pt_name, subcategory in PRODUCT_TYPES_CACHE.items():
+        if pt_name.lower() in product_type_lower or product_type_lower in pt_name.lower():
+            return subcategory
+
+    # Fallback: devolver None si no se encuentra subcategoría
+    return None
+
+def extract_products(driver, product_type_name, category_name, subcategory_name=None):
+    """Extraer productos de la página filtrada con campos adicionales"""
     try:
         try:
             WebDriverWait(driver, 3).until(
@@ -445,47 +592,132 @@ def extract_products(driver, product_type_name, category_name):
                         logging.debug(f"Skipping product {i+1} - could not extract name")
                         continue
 
-                # Extract price - try multiple selectors
-                price_selectors = [
-                    "span.vtex-product-price-1-x-sellingPrice",
-                    "span.vtex-product-price-1-x-currencyContainer",
-                    "span.vtex-store-components-3-x-price",
-                    ".vtex-product-price-1-x-sellingPrice",
-                    ".vtex-product-price-1-x-currencyContainer",
-                    "[data-testid*='price']",
-                    ".product-price",
-                    "span:contains('$')",
-                    "span:contains('ARS')",
-                    "div:contains('$')",
-                    "span.valtex-carrefourar"
-                ]
+                # Extract price information (sellingPrice, listPrice, discount logic)
+                selling_price = None
+                list_price = None
+                original_price = None
+                discount_percentage = 0
+                is_on_sale = False
 
-                product_price = None
-                for price_sel in price_selectors:
+                # Debug specific product
+                if "Contadora de billetes" in product_name:
+                    logging.warning(f"Processing product '{product_name}'")
+
+                # Find price container - use the wrapPrice container from the HTML structure
+                price_container = None
+                try:
+                    price_container = product_elem.find_element(By.CLASS_NAME, 'vtex-flex-layout-0-x-flexCol--wrapPrice')
+                except:
+                    # Fallback: try the old priceContainer class
                     try:
-                        if ":contains" in price_sel:
-                            # Handle :contains pseudo-selector with XPath
-                            text_to_find = price_sel.split("'")[1]
-                            price_elem = product_elem.find_element(By.XPATH, f".//*[contains(text(), '{text_to_find}')]")
-                        else:
-                            price_elem = product_elem.find_element(By.CSS_SELECTOR, price_sel)
-
-                        price_text = price_elem.text.strip()
-                        if price_text and ('$' in price_text or 'ARS' in price_text or any(char.isdigit() for char in price_text)):
-                            product_price = price_text
-                            break
+                        price_container = product_elem.find_element(By.CLASS_NAME, 'valtech-carrefourar-product-price-0-x-priceContainer')
                     except:
-                        continue
+                        pass
 
-                if not product_price:
-                    # Try to find any text that looks like a price in the product element
+                # Extract selling price and list price from the container
+                if price_container:
+                    # Extract selling price
+                    try:
+                        selling_price_element = price_container.find_element(By.CLASS_NAME, 'valtech-carrefourar-product-price-0-x-sellingPrice')
+                        # Find the currency container within the selling price element
+                        currency_container = selling_price_element.find_element(By.CLASS_NAME, 'valtech-carrefourar-product-price-0-x-currencyContainer')
+                        selling_price = extract_price_from_currency_container(currency_container)
+                    except Exception as e:
+                        pass
+
+                    # Extract list price
+                    try:
+                        list_price_element = price_container.find_element(By.CLASS_NAME, 'valtech-carrefourar-product-price-0-x-listPrice')
+                        # Find the currency container within the list price element
+                        currency_container = list_price_element.find_element(By.CLASS_NAME, 'valtech-carrefourar-product-price-0-x-currencyContainer')
+                        list_price = extract_price_from_currency_container(currency_container)
+                    except Exception as e:
+                        # Fallback: try to find listPrice anywhere in the product element
+                        try:
+                            list_price_element = product_elem.find_element(By.CLASS_NAME, 'valtech-carrefourar-product-price-0-x-listPrice')
+                            currency_container = list_price_element.find_element(By.CLASS_NAME, 'valtech-carrefourar-product-price-0-x-currencyContainer')
+                            list_price = extract_price_from_currency_container(currency_container)
+                        except Exception as e2:
+                            pass
+
+                # If no prices found from containers, try direct selectors as fallback
+                if selling_price is None:
+                    price_selectors = [
+                        "span.valtech-carrefourar-product-price-0-x-sellingPrice",
+                        "span.valtech-carrefourar-product-price-0-x-sellingPriceValue",
+                        "span.vtex-product-price-1-x-sellingPrice",
+                        "span.vtex-product-price-1-x-currencyContainer",
+                        "[data-testid*='selling-price']",
+                        ".selling-price"
+                    ]
+
+                    for price_sel in price_selectors:
+                        try:
+                            if ":contains" in price_sel:
+                                continue
+                            price_elem = product_elem.find_element(By.CSS_SELECTOR, price_sel)
+                            price_text = price_elem.text.strip()
+                            if price_text and ('$' in price_text or 'ARS' in price_text):
+                                selling_price = parse_argentine_price(price_text)
+                                break
+                        except:
+                            continue
+
+                # Try to extract list price (original price if on sale)
+                if list_price is None:
+                    list_price_selectors = [
+                        "span.valtech-carrefourar-product-price-0-x-listPrice",
+                        "span.vtex-product-price-1-x-listPrice",
+                        "[data-testid*='list-price']",
+                        ".list-price",
+                        ".original-price"
+                    ]
+
+                    for price_sel in list_price_selectors:
+                        try:
+                            if ":contains" in price_sel:
+                                continue
+                            price_elem = product_elem.find_element(By.CSS_SELECTOR, price_sel)
+                            price_text = price_elem.text.strip()
+                            if price_text and ('$' in price_text or 'ARS' in price_text):
+                                list_price = parse_argentine_price(price_text)
+                                break
+                        except:
+                            continue
+
+                # Convert prices to float for calculations
+                selling_price_float = parse_argentine_price(selling_price) if selling_price else None
+                list_price_float = parse_argentine_price(list_price) if list_price else None
+
+                # If we have both prices, determine discount
+                if selling_price_float and list_price_float:
+                    if selling_price_float < list_price_float:
+                        # Product is on sale
+                        original_price = list_price
+                        discount_percentage = round(((list_price_float - selling_price_float) / list_price_float) * 100, 2)
+                        is_on_sale = True
+                    else:
+                        # No discount, selling price is the list price
+                        original_price = selling_price
+                elif selling_price_float:
+                    # Only selling price found
+                    original_price = selling_price
+                    list_price = selling_price
+                    list_price_float = selling_price_float
+                else:
+                    # Fallback to regex extraction
                     try:
                         product_text = product_elem.text
                         import re
-                        # Look for price patterns like $123, $123.456, 123.456, etc.
                         price_match = re.search(r'\$?\d{1,3}(?:\.\d{3})*(?:,\d{2})?', product_text)
                         if price_match:
-                            product_price = price_match.group()
+                            extracted_price = parse_argentine_price(price_match.group())
+                            if extracted_price:
+                                selling_price = price_match.group()
+                                selling_price_float = extracted_price
+                                list_price = selling_price
+                                list_price_float = extracted_price
+                                original_price = selling_price
                         else:
                             logging.debug(f"Skipping product {i+1} - could not extract valid price")
                             continue
@@ -493,12 +725,232 @@ def extract_products(driver, product_type_name, category_name):
                         logging.debug(f"Skipping product {i+1} - could not extract price")
                         continue
 
+                # Extract image URL
+                image_url = None
+                try:
+                    img_elem = product_elem.find_element(By.CSS_SELECTOR, "img.vtex-product-summary-2-x-image")
+                    image_url = img_elem.get_attribute("src")
+                except:
+                    try:
+                        # Try alternative selectors
+                        img_selectors = ["img", ".vtex-product-summary-2-x-imageContainer img"]
+                        for img_sel in img_selectors:
+                            try:
+                                img_elem = product_elem.find_element(By.CSS_SELECTOR, img_sel)
+                                image_url = img_elem.get_attribute("src")
+                                if image_url:
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+
+                # Extract brand (must match with brands from 'filters' collection)
+                brand = None
+                if product_name:
+                    brand = extract_brand(product_name)
+
+                # Extract subcategory (must match with subcategory from 'producttypes' collection)
+                subcategory = None
+                if product_type_name:
+                    subcategory = extract_subcategory(product_type_name)
+
+                # Extract promotions/ribbons
+                promotions = []
+                try:
+                    ribbon_selectors = [
+                        "span[data-specification-name]",
+                        ".valtech-carrefourar-product-highlights-0-x-productRibbonHighlightWrapper",
+                        "[class*='ribbon']",
+                        "[class*='promotion']"
+                    ]
+                    for ribbon_sel in ribbon_selectors:
+                        try:
+                            ribbon_elems = product_elem.find_elements(By.CSS_SELECTOR, ribbon_sel)
+                            for ribbon_elem in ribbon_elems:
+                                ribbon_text = ribbon_elem.text.strip()
+                                if ribbon_text and len(ribbon_text) > 3:
+                                    promotions.append(ribbon_text)
+                        except:
+                            continue
+                except:
+                    pass
+
+                # Extract product ID
+                product_id = None
+                try:
+                    # Try to get from various attributes
+                    id_selectors = [
+                        "[data-product-id]",
+                        "[data-product-sku]",
+                        "[id*='product']",
+                        "input[id*='739187']"
+                    ]
+                    for id_sel in id_selectors:
+                        try:
+                            id_elem = product_elem.find_element(By.CSS_SELECTOR, id_sel)
+                            product_id = id_elem.get_attribute("data-product-id") or id_elem.get_attribute("data-product-sku") or id_elem.get_attribute("id")
+                            if product_id:
+                                break
+                        except:
+                            continue
+
+                    # Try to extract from checkbox id pattern like "739187-188121-product-comparison"
+                    if not product_id:
+                        try:
+                            checkbox = product_elem.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+                            checkbox_id = checkbox.get_attribute("id")
+                            if checkbox_id and "-product-comparison" in checkbox_id:
+                                product_id = checkbox_id.split("-product-comparison")[0]
+                        except:
+                            pass
+                except:
+                    pass
+
+                # Check availability (if add to cart button exists)
+                available = True
+                try:
+                    # Look for add to cart button or unavailable indicators
+                    cart_buttons = product_elem.find_elements(By.CSS_SELECTOR, "button.vtex-button, .valtech-carrefourar-add-to-cart-quantity-0-x-container")
+                    unavailable_indicators = product_elem.find_elements(By.CSS_SELECTOR, "[class*='unavailable'], [class*='out-of-stock']")
+
+                    if unavailable_indicators or not cart_buttons:
+                        available = False
+                except:
+                    pass
+
+                # Extract product URL
+                product_url = None
+                try:
+                    # Try to find product link
+                    link_elem = product_elem.find_element(By.CSS_SELECTOR, "a[href*='/p']")
+                    product_url = link_elem.get_attribute("href")
+                    if product_url and not product_url.startswith("http"):
+                        product_url = f"https://www.carrefour.com.ar{product_url}"
+                except:
+                    try:
+                        # Alternative selectors for product links
+                        link_selectors = ["a.vtex-product-summary-2-x-clearLink", "a[href]", "a"]
+                        for link_sel in link_selectors:
+                            try:
+                                link_elem = product_elem.find_element(By.CSS_SELECTOR, link_sel)
+                                href = link_elem.get_attribute("href")
+                                if href and '/p' in href:
+                                    product_url = href if href.startswith("http") else f"https://www.carrefour.com.ar{href}"
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+
+                # Extract description (if available in product summary)
+                description = None
+                try:
+                    desc_selectors = [
+                        ".vtex-product-summary-2-x-productDescription",
+                        "[class*='description']",
+                        ".valtech-carrefourar-product-summary-0-x-productDescription"
+                    ]
+                    for desc_sel in desc_selectors:
+                        try:
+                            desc_elem = product_elem.find_element(By.CSS_SELECTOR, desc_sel)
+                            description = desc_elem.text.strip()
+                            if description:
+                                break
+                        except:
+                            continue
+                except:
+                    pass
+
+                # Extract nutritional info (if available)
+                nutritional_info = None
+                try:
+                    # Look for nutritional information in product details
+                    nutritional_selectors = [
+                        "[class*='nutritional']",
+                        "[class*='nutrition']",
+                        ".valtech-carrefourar-product-summary-0-x-nutritionalInfo"
+                    ]
+                    for nutr_sel in nutritional_selectors:
+                        try:
+                            nutr_elem = product_elem.find_element(By.CSS_SELECTOR, nutr_sel)
+                            nutritional_info = nutr_elem.text.strip()
+                            if nutritional_info:
+                                break
+                        except:
+                            continue
+                except:
+                    pass
+
+                # Extract package info (weight, volume, etc.)
+                package_info = None
+                try:
+                    package_selectors = [
+                        "[class*='package']",
+                        "[class*='weight']",
+                        "[class*='volume']",
+                        ".valtech-carrefourar-product-summary-0-x-packageInfo"
+                    ]
+                    for pkg_sel in package_selectors:
+                        try:
+                            pkg_elem = product_elem.find_element(By.CSS_SELECTOR, pkg_sel)
+                            package_info = pkg_elem.text.strip()
+                            if package_info:
+                                break
+                        except:
+                            continue
+                except:
+                    pass
+
+                # Extract promotional clusters
+                promotional_clusters = []
+                try:
+                    # Look for promotional badges or clusters
+                    cluster_selectors = [
+                        ".valtech-carrefourar-product-highlights-0-x-productClusterHighlight",
+                        "[class*='cluster']",
+                        "[class*='highlight']",
+                        "[data-specification-name]"
+                    ]
+                    for cluster_sel in cluster_selectors:
+                        try:
+                            cluster_elems = product_elem.find_elements(By.CSS_SELECTOR, cluster_sel)
+                            for cluster_elem in cluster_elems:
+                                cluster_text = cluster_elem.text.strip()
+                                if cluster_text and len(cluster_text) > 2:
+                                    promotional_clusters.append(cluster_text)
+                        except:
+                            continue
+                except:
+                    pass
+
                 product_data = {
                     'name': product_name,
-                    'price': product_price,
-                    'productType': product_type_name,  # Campo productType incluido
+                    'sellingPrice': selling_price,  # Precio de venta
+                    'listPrice': list_price,  # Precio de lista
+                    'discountPercentage': discount_percentage,  # Porcentaje de descuento
+                    'isOnSale': is_on_sale,  # Si está en oferta
+                    'currency': 'ARS',  # Moneda
+                    'productType': product_type_name,
                     'category': category_name,
-                    'extracted_at': datetime.now()
+                    'subcategory': subcategory,  # Campo requerido (extraído de producttypes collection)
+                    'mainImage': image_url,  # Imagen principal
+                    'brand': brand,
+                    'promotions': promotions,
+                    'productId': product_id,
+                    'available': available,
+                    'scrapedAt': datetime.now(),  # Timestamp de scraping
+                    'lastUpdated': datetime.now(),  # Última actualización
+                    'seller': 'Carrefour',  # Vendedor
+                    # Nuevos campos agregados
+                    'productUrl': product_url,  # URL del producto
+                    'description': description,  # Descripción del producto
+                    'isAvailable': available,  # Si está disponible (mapeado de 'available')
+                    'nutritionalInfo': nutritional_info,  # Información nutricional
+                    'packageInfo': package_info,  # Información de empaque
+                    'createdAt': datetime.now(),  # Fecha de creación
+                    'updatedAt': datetime.now(),  # Fecha de actualización
+                    'promotionalClusters': promotional_clusters  # Clusters promocionales
                 }
 
                 products.append(product_data)
@@ -938,7 +1390,7 @@ def get_total_products(driver):
         logging.error(f"Error getting total products: {e}")
         return None
 
-def extract_all_products_from_pages(driver, product_type_name, category_name):
+def extract_all_products_from_pages(driver, product_type_name, category_name, subcategory_name=None):
     """Extract products from all pages for a product type"""
     try:
         all_products = []
@@ -952,7 +1404,7 @@ def extract_all_products_from_pages(driver, product_type_name, category_name):
 
         while True:
             # Extract products from current page
-            page_products = extract_products(driver, product_type_name, category_name)
+            page_products = extract_products(driver, product_type_name, category_name, subcategory_name)
             page_count = len(page_products)
 
             if page_count == 0:
@@ -989,31 +1441,56 @@ def extract_all_products_from_pages(driver, product_type_name, category_name):
         return []
 
 def save_products_to_db(products, category_name):
-    """Save individual products to the 'products' collection in MongoDB"""
+    """Save individual products to the 'products' collection in MongoDB with upsert logic"""
     try:
         client = MongoClient('mongodb://localhost:27017/')
         db = client['carrefour']
         collection = db['products']
 
         saved_count = 0
+        updated_count = 0
+
         for product in products:
             try:
                 # Add category and timestamp if not present
                 if 'category' not in product:
                     product['category'] = category_name
-                if 'extracted_at' not in product:
-                    product['extracted_at'] = datetime.now()
+                # Always update the extraction timestamp
+                product['extracted_at'] = datetime.now()
 
-                # Insert the product
-                result = collection.insert_one(product)
-                saved_count += 1
+                # Create unique filter based on name, productType, and category
+                filter_criteria = {
+                    'name': product.get('name'),
+                    'productType': product.get('productType'),
+                    'category': product.get('category')
+                }
+
+                # Use upsert to update existing products or insert new ones
+                result = collection.update_one(
+                    filter_criteria,
+                    {'$set': product},
+                    upsert=True
+                )
+
+                if result.upserted_id:
+                    # New document was inserted
+                    saved_count += 1
+                elif result.modified_count > 0:
+                    # Existing document was updated
+                    updated_count += 1
+                else:
+                    # Document existed but no changes were made
+                    saved_count += 1  # Count as "saved" for compatibility
 
             except Exception as e:
+                logging.debug(f"Error saving product '{product.get('name', 'Unknown')}': {e}")
                 continue
 
         client.close()
 
-        return saved_count
+        total_processed = saved_count + updated_count
+        logging.warning(f"Processed {total_processed} products ({saved_count} new, {updated_count} updated)")
+        return total_processed
 
     except Exception as e:
         logging.error(f"Error saving products to database: {e}")
@@ -1129,7 +1606,7 @@ def process_single_category(category_data):
             time.sleep(0.3)
 
             # Extract all products from all pages with retry
-            all_products = extract_all_products_from_pages(driver, selected_type, category_name)
+            all_products = extract_all_products_from_pages(driver, selected_type, category_name, None)
 
             if all_products:
                 # Save products to 'products' collection
@@ -1157,6 +1634,82 @@ def process_single_category(category_data):
                 thread_logger.info(f"🛑 Driver closed for category '{category_name}'")
             except:
                 pass
+
+def extract_brand(product_name):
+    """Extract brand from product name using sophisticated matching logic with cache"""
+    if not product_name:
+        return None
+
+    # Cache for brands to avoid repeated database queries
+    if not hasattr(extract_brand, 'brands_cache'):
+        try:
+            client = MongoClient('mongodb://localhost:27017/')
+            db = client['carrefour']
+            filters_collection = db['filters']
+
+            # Load all brands from filters collection
+            brands_docs = filters_collection.find({'type': 'brand'}, {'name': 1})
+            extract_brand.brands_cache = [doc['name'] for doc in brands_docs]
+
+            client.close()
+
+            if not extract_brand.brands_cache:
+                logging.debug("No brands found in filters collection")
+                return 'Carrefour'
+
+        except Exception as e:
+            logging.debug(f"Error loading brands cache: {e}")
+            extract_brand.brands_cache = []
+
+    # If cache is empty, return default
+    if not extract_brand.brands_cache:
+        return 'Carrefour'
+
+    product_name_lower = product_name.lower()
+
+    # Strategy 1: Exact match
+    for brand in extract_brand.brands_cache:
+        if brand.lower() == product_name_lower:
+            return brand
+
+    # Strategy 2: Brand contained in product name
+    for brand in extract_brand.brands_cache:
+        if brand.lower() in product_name_lower:
+            return brand
+
+    # Strategy 3: Extract from initial words (1-3 words)
+    words = product_name.split()
+    if words:
+        for i in range(min(3, len(words))):
+            candidate = ' '.join(words[:i+1])
+            for brand in extract_brand.brands_cache:
+                if brand.lower() == candidate.lower():
+                    return brand
+
+    # Strategy 4: Fallback to Carrefour for own-brand products
+    return 'Carrefour'
+
+def extract_subcategory(product_type_name):
+    """Extract subcategory from product type name by matching against producttypes collection"""
+    if not product_type_name:
+        return None
+
+    try:
+        client = MongoClient('mongodb://localhost:27017/')
+        db = client['carrefour']
+        producttypes_collection = db['producttypes']
+
+        # Find product type document
+        product_type_doc = producttypes_collection.find_one({"name": product_type_name}, {"subcategory": 1})
+
+        if product_type_doc and 'subcategory' in product_type_doc:
+            return product_type_doc['subcategory']
+
+        return None
+
+    except Exception as e:
+        logging.debug(f"Error extracting subcategory from '{product_type_name}': {e}")
+        return None
 
 def main():
     """Main function - process ONLY ONE category and save products to 'products' collection"""
