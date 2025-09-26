@@ -1,56 +1,119 @@
 #!/usr/bin/env python3
 """
-Script completo para extraer TODOS los productos de TODOS los tipos de producto
-Incluye paginación completa - procesa múltiples páginas por tipo de producto
+Script para extraer TODOS los productos de UNA categoría y guardarlos en la colección 'products'
+Sigue la lógica de iteración de step5_products.py pero guarda productos individuales en lugar de arrays
+Incluye el campo 'productType' en cada producto
 """
 import time
 import logging
+import json
+import os
+import random
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 from pymongo import MongoClient
 from datetime import datetime
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging - SIMPLIFIED
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 
-def clear_producttypes_arrays():
-    """Clear all products arrays in the producttypes collection"""
+# Anti-detection constants
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
+]
+
+# Optimized delays for faster processing
+MIN_DELAY = 0.5  # Reduced from 1
+MAX_DELAY = 1.5  # Reduced from 3
+
+def random_delay():
+    """Shorter random delay for faster processing"""
+    time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+
+# Retry configuration
+MAX_RETRIES = 3
+BASE_RETRY_DELAY = 5  # Base delay in seconds for exponential backoff
+
+def retry_with_backoff(func, max_retries=MAX_RETRIES, base_delay=BASE_RETRY_DELAY, *args, **kwargs):
+    """Execute a function with exponential backoff retry logic"""
+    for attempt in range(max_retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries:
+                logging.error(f"Function {func.__name__} failed after {max_retries + 1} attempts: {e}")
+                raise e
+
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)  # Exponential backoff with jitter
+            logging.warning(f"Attempt {attempt + 1} failed for {func.__name__}: {e}. Retrying in {delay:.2f} seconds...")
+            time.sleep(delay)
+
+    return None
+
+def simulate_human_behavior(driver):
+    """Simulate human-like behavior to avoid detection"""
     try:
-        client = MongoClient('mongodb://localhost:27017/')
-        db = client['carrefour']
-        collection = db['producttypes']
+        # Random scroll to simulate reading
+        scroll_amount = random.randint(200, 800)
+        driver.execute_script(f"window.scrollTo(0, {scroll_amount});")
 
-        # Clear products arrays for all documents
-        result = collection.update_many(
-            {},  # All documents
-            {"$set": {"products": []}}  # Set products array to empty
-        )
+        # Random pause
+        time.sleep(random.uniform(0.5, 2.0))
 
-        client.close()
+        # Simulate mouse movement
+        actions = ActionChains(driver)
+        # Move mouse to random position
+        actions.move_by_offset(random.randint(-100, 100), random.randint(-50, 50))
+        actions.perform()
 
-        logging.info(f"✓ Cleared products arrays for {result.modified_count} documents in producttypes collection")
-        return result.modified_count
+        # Another random pause
+        time.sleep(random.uniform(0.3, 1.5))
 
     except Exception as e:
-        logging.error(f"Error clearing producttypes arrays: {e}")
-        return 0
+        logging.debug(f"Could not simulate human behavior: {e}")
 
-def setup_driver():
-    """Setup Firefox WebDriver (NO HEADLESS para que el usuario pueda ver)"""
+def get_random_user_agent():
+    """Get a random user agent"""
+    return random.choice(USER_AGENTS)
+
+def setup_driver(user_agent=None):
+    """Setup Firefox WebDriver with anti-detection measures"""
     firefox_options = Options()
     # NO headless - el usuario quiere ver el proceso
     firefox_options.add_argument("--no-sandbox")
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--window-size=1920,1080")
 
+    # Anti-detection measures
+    if user_agent:
+        firefox_options.set_preference("general.useragent.override", user_agent)
+
+    # Disable WebRTC to prevent IP leaks
+    firefox_options.set_preference("media.peerconnection.enabled", False)
+
+    # Randomize other preferences to avoid fingerprinting
+    firefox_options.set_preference("dom.webdriver.enabled", False)
+    firefox_options.set_preference('useAutomationExtension', False)
+
+    # Disable images to speed up loading (optional)
+    # firefox_options.set_preference("permissions.default.image", 2)
+
     geckodriver_path = r"d:\dev\caminando-onlinev8\geckodriver_temp\geckodriver.exe"
     service = Service(geckodriver_path)
     driver = webdriver.Firefox(service=service, options=firefox_options)
-    logging.info("WebDriver initialized successfully (NO HEADLESS)")
+
+    # Execute script to remove webdriver property
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
     return driver
 
 def handle_cookies(driver):
@@ -60,54 +123,51 @@ def handle_cookies(driver):
         for btn in accept_buttons:
             try:
                 btn.click()
-                logging.info("Clicked cookie accept button")
-                time.sleep(2)
+                time.sleep(1)
                 break
             except:
                 continue
     except Exception as e:
-        logging.warning(f"Could not handle cookie popup: {e}")
+        pass
 
 def open_filters_panel(driver):
     """Open the filters panel if not already open"""
     try:
-        filters_button = WebDriverWait(driver, 10).until(
+        filters_button = WebDriverWait(driver, 5).until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Filtrar')]"))
         )
         filters_button.click()
-        logging.info("Opened filters panel")
-        time.sleep(2)
+        time.sleep(0.5)
     except:
-        logging.info("Filters panel already open or no button found")
+        pass
 
 def scroll_to_load_filters(driver):
     """Scroll down to ensure filters are loaded"""
     driver.execute_script("window.scrollTo(0, 500);")
-    time.sleep(3)
-    logging.info("Scrolled down to load filters")
+    time.sleep(0.5)
 
-def get_first_category():
-    """Get the first category from MongoDB categories collection"""
+def get_all_categories():
+    """Get all categories from MongoDB categories collection"""
     try:
         client = MongoClient('mongodb://localhost:27017/')
         db = client['carrefour']
         collection = db['categories']
 
-        # Get first category
-        category = collection.find_one({}, {'name': 1, 'url': 1, '_id': 0}, sort=[('_id', 1)])
+        # Get all categories
+        categories = list(collection.find({}, {'name': 1, 'url': 1, '_id': 0}))
 
         client.close()
 
-        if category:
-            logging.info(f"✓ Retrieved first category: {category.get('name')} -> {category.get('url')}")
-            return category
+        if categories:
+            logging.warning(f"Retrieved {len(categories)} categories from database")
+            return categories
         else:
             logging.error("No categories found in database")
-            return None
+            return []
 
     except Exception as e:
-        logging.error(f"Error retrieving first category from database: {e}")
-        return None
+        logging.error(f"Error retrieving categories from database: {e}")
+        return []
 
 def expand_product_type_menu(driver):
     """Buscar el menú 'Tipo de Producto' en el contenedor de filtros y expandirlo"""
@@ -143,14 +203,11 @@ def expand_product_type_menu(driver):
             expand_button = product_types_container.find_element(By.CSS_SELECTOR, "div[role='button']")
             if expand_button and expand_button.is_displayed():
                 driver.execute_script("arguments[0].scrollIntoView();", expand_button)
-                time.sleep(1)
+                time.sleep(0.5)
                 driver.execute_script("arguments[0].click();", expand_button)
-                logging.info("✓ Expanded product types menu")
-                time.sleep(2)
-            else:
-                logging.info("Product types menu already expanded")
+                time.sleep(1)
         except Exception as e:
-            logging.info(f"No expand button found for product types (already expanded): {e}")
+            pass
 
         return product_types_container
 
@@ -163,8 +220,7 @@ def scroll_and_click_ver_mas_product_types(driver, product_types_container):
     try:
         # Scroll to the bottom of the container
         driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", product_types_container)
-        time.sleep(2)
-        logging.info("Scrolled to bottom of product types menu")
+        time.sleep(1)
 
         # Look for "Ver más" or "Ver mas" button - try multiple selectors
         ver_mas_selectors = [
@@ -192,11 +248,10 @@ def scroll_and_click_ver_mas_product_types(driver, product_types_container):
                         # Check if button is visible and enabled
                         if btn.is_displayed() and btn.is_enabled():
                             driver.execute_script("arguments[0].scrollIntoView();", btn)
-                            time.sleep(1)
+                            time.sleep(0.5)
                             driver.execute_script("arguments[0].click();", btn)
-                            logging.info(f"✓ Clicked 'Ver más' button for product types: '{btn.text}'")
                             button_clicked = True
-                            time.sleep(2)  # Wait for all items to load
+                            time.sleep(0.5)
                             break
 
                 if button_clicked:
@@ -206,13 +261,9 @@ def scroll_and_click_ver_mas_product_types(driver, product_types_container):
                 logging.debug(f"Selector {selector} failed: {e}")
                 continue
 
-        if not button_clicked:
-            logging.info("No 'Ver más' button found for product types (all items may already be visible)")
-
         # Scroll again to ensure all items are visible
         driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", product_types_container)
-        time.sleep(2)
-        logging.info("✓ Product types list should now be fully visible")
+        time.sleep(0.5)
 
         return True
 
@@ -248,7 +299,6 @@ def get_all_product_types(driver):
                 continue
 
         if not checkboxes:
-            logging.warning("No product type checkboxes found")
             return []
 
         product_types = []
@@ -263,12 +313,10 @@ def get_all_product_types(driver):
 
                     if clean_label and clean_label not in product_types:
                         product_types.append(clean_label)
-                        logging.debug(f"Found product type: '{clean_label}'")
             except Exception as e:
-                logging.debug(f"Error checking checkbox: {e}")
                 continue
 
-        logging.info(f"✓ Found {len(product_types)} product types")
+        logging.warning(f"Found {len(product_types)} product types")
         return product_types
 
     except Exception as e:
@@ -298,36 +346,35 @@ def apply_filter(driver):
                     text = element.text.lower()
                     if "aplicar" in text:
                         driver.execute_script("arguments[0].scrollIntoView();", element)
-                        time.sleep(1)
+                        time.sleep(0.5)
                         driver.execute_script("arguments[0].click();", element)
-                        logging.info("✓ Filter applied")
-                        time.sleep(3)  # Wait for filter to be applied
+                        time.sleep(0.5)
                         return True
 
             except Exception as e:
-                logging.debug(f"Selector {selector} failed: {e}")
                 continue
 
-        logging.error("No 'Aplicar' button found")
         return False
 
     except Exception as e:
         logging.error(f"Error applying filter: {e}")
         return False
 
-def extract_products(driver, product_type_name):
+def extract_products(driver, product_type_name, category_name):
     """Extraer productos de la página filtrada"""
     try:
-        # Wait for products to load
-        time.sleep(3)
+        try:
+            WebDriverWait(driver, 3).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "[data-testid*='product'], .product-container, .vtex-product-summary")) > 0
+            )
+        except:
+            time.sleep(0.5)
 
         # Try multiple selectors for product containers
         product_selectors = [
             "div.valtech-carrefourar-search-result-3-x-galleryItem",
             "div[data-testid*='product']",
-            "div.vtex-product-summary",
-            "div.product-item",
-            ".product-container"
+            "div.vtex-product-summary"
         ]
 
         products = []
@@ -335,10 +382,8 @@ def extract_products(driver, product_type_name):
             try:
                 product_elements = driver.find_elements(By.CSS_SELECTOR, selector)
                 if product_elements:
-                    logging.info(f"Found {len(product_elements)} products with selector: {selector}")
                     break
             except Exception as e:
-                logging.debug(f"Selector {selector} failed: {e}")
                 continue
 
         if not product_elements:
@@ -347,7 +392,7 @@ def extract_products(driver, product_type_name):
 
         logging.info(f"Extracting data from {len(product_elements)} products")
 
-        for i, product_elem in enumerate(product_elements):  # Extract ALL products, no limit
+        for i, product_elem in enumerate(product_elements):
             try:
                 # Extract product name - try multiple selectors
                 name_selectors = [
@@ -357,10 +402,10 @@ def extract_products(driver, product_type_name):
                     "a.vtex-product-summary-2-x-productName",
                     "[data-testid*='product-name']",
                     ".vtex-product-summary-2-x-productName",
-                    "span:contains('Aire')",  # Specific for air conditioners
-                    "span:contains('Split')",  # Specific for air conditioners
-                    "h3",  # Generic h3
-                    "a[href*='/p']"  # Product links
+                    "span:contains('Aire')",
+                    "span:contains('Split')",
+                    "h3",
+                    "a[href*='/p']"
                 ]
 
                 product_name = None
@@ -383,11 +428,22 @@ def extract_products(driver, product_type_name):
                 if not product_name:
                     # Try to get text from the entire product element
                     try:
-                        product_name = product_elem.text.split('\n')[0].strip()
-                        if len(product_name) < 3:
-                            product_name = f"Product_{i+1}"
+                        full_text = product_elem.text.strip()
+                        # Look for meaningful product name patterns
+                        lines = full_text.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if len(line) > 5 and not any(char.isdigit() for char in line[:10]):  # Avoid price-like text
+                                product_name = line
+                                break
+
+                        # If still no good name, skip this product entirely
+                        if not product_name or len(product_name) < 5:
+                            logging.debug(f"Skipping product {i+1} - could not extract valid name")
+                            continue
                     except:
-                        product_name = f"Product_{i+1}"
+                        logging.debug(f"Skipping product {i+1} - could not extract name")
+                        continue
 
                 # Extract price - try multiple selectors
                 price_selectors = [
@@ -398,10 +454,10 @@ def extract_products(driver, product_type_name):
                     ".vtex-product-price-1-x-currencyContainer",
                     "[data-testid*='price']",
                     ".product-price",
-                    "span:contains('$')",  # Look for price with dollar sign
-                    "span:contains('ARS')",  # Look for ARS currency
-                    "div:contains('$')",  # Price in div
-                    "span.valtex-carrefourar"  # Carrefour specific
+                    "span:contains('$')",
+                    "span:contains('ARS')",
+                    "div:contains('$')",
+                    "span.valtex-carrefourar"
                 ]
 
                 product_price = None
@@ -431,25 +487,25 @@ def extract_products(driver, product_type_name):
                         if price_match:
                             product_price = price_match.group()
                         else:
-                            product_price = "Price not found"
+                            logging.debug(f"Skipping product {i+1} - could not extract valid price")
+                            continue
                     except:
-                        product_price = "Price not found"
+                        logging.debug(f"Skipping product {i+1} - could not extract price")
+                        continue
 
                 product_data = {
                     'name': product_name,
                     'price': product_price,
-                    'product_type': product_type_name,
+                    'productType': product_type_name,  # Campo productType incluido
+                    'category': category_name,
                     'extracted_at': datetime.now()
                 }
 
                 products.append(product_data)
-                logging.info(f"✓ Extracted product {i+1}: {product_name} - {product_price}")
 
             except Exception as e:
-                logging.debug(f"Error extracting product {i+1}: {e}")
                 continue
 
-        logging.info(f"✓ Successfully extracted {len(products)} products")
         return products
 
     except Exception as e:
@@ -478,14 +534,12 @@ def get_total_pages(driver):
                 continue
 
         if not pagination_container:
-            logging.info("No pagination container found - only one page")
             return 1
 
         # Find all page buttons
         page_buttons = pagination_container.find_elements(By.CSS_SELECTOR, "button[value]")
 
         if not page_buttons:
-            logging.info("No page buttons found - only one page")
             return 1
 
         # Get the highest page number
@@ -499,7 +553,6 @@ def get_total_pages(driver):
             except:
                 continue
 
-        logging.info(f"✓ Found {max_page} pages total")
         return max_page
 
     except Exception as e:
@@ -538,17 +591,16 @@ def navigate_to_page(driver, page_number):
                 if page_button and page_button.is_displayed():
                     # Scroll to and click the page button
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", page_button)
-                    time.sleep(1)
+                    time.sleep(0.5)
 
                     # Wait until the button is clickable
-                    WebDriverWait(driver, 10).until(EC.element_to_be_clickable(page_button))
+                    WebDriverWait(driver, 5).until(EC.element_to_be_clickable(page_button))
 
                     driver.execute_script("arguments[0].click();", page_button)
-                    logging.info(f"✓ Navigated to page {page_number} using page button")
-                    time.sleep(3)
+                    time.sleep(0.5)
                     return True
         except:
-            logging.debug(f"Could not find page {page_number} button, trying Next button approach")
+            pass
 
         # Fallback: Use Next button to navigate page by page
         # This is more reliable when there are many pages
@@ -583,17 +635,14 @@ def navigate_to_page(driver, page_number):
 
                 # Click Next button
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
-                time.sleep(1)
+                time.sleep(0.5)
                 driver.execute_script("arguments[0].click();", next_button)
-                logging.info(f"✓ Clicked Next button to go from page {current_page} to {current_page + 1}")
                 current_page += 1
-                time.sleep(3)
+                time.sleep(0.5)
 
             except Exception as e:
-                logging.error(f"Error clicking Next button at page {current_page}: {e}")
                 return False
 
-        logging.info(f"✓ Successfully navigated to page {page_number}")
         return True
 
     except Exception as e:
@@ -604,24 +653,18 @@ def select_product_type(driver, target_product_type):
     """Seleccionar un tipo de producto específico usando las mismas funciones que funcionan al inicio del script"""
     try:
         # Use the same expansion logic as the initial setup
-        logging.info("Expanding product type filter using proven method...")
-
-        # PASO 1: Expandir menú de "Tipo de Producto" usando la función probada
         product_types_container = expand_product_type_menu(driver)
         if not product_types_container:
-            logging.error("Failed to expand product types menu")
             return None
 
-        # PASO 2: Hacer scroll y buscar botón "Ver más" usando la función probada
+        # Scroll and click "Ver más" if needed
         scroll_and_click_ver_mas_product_types(driver, product_types_container)
 
-        # Now try to find the target product type
         # Try multiple selectors for product type checkboxes
         checkbox_selectors = [
             "input[type='checkbox'][id^='tipo-de-producto-']",
             "input[type='checkbox']",
-            ".valtech-carrefourar-search-result-3-x-filter__checkbox input[type='checkbox']",
-            "input[id*='tipo-de-producto']"
+            ".valtech-carrefourar-search-result-3-x-filter__checkbox input[type='checkbox']"
         ]
 
         # Function to find checkboxes
@@ -632,7 +675,6 @@ def select_product_type(driver, target_product_type):
                     if elements:
                         return elements
                 except Exception as e:
-                    logging.debug(f"Selector {selector} failed: {e}")
                     continue
             return []
 
@@ -647,34 +689,43 @@ def select_product_type(driver, target_product_type):
                         # Remove count in parentheses if present
                         clean_label = label_text.split('(')[0].strip()
 
-                        logging.debug(f"Found product type: '{clean_label}'")
+                        if clean_label.lower() == target_product_type.lower():
+                            return checkbox, clean_label
+                except Exception as e:
+                    continue
+            return None, None
+
+        # Function to find target checkbox
+        def find_target_checkbox(checkboxes):
+            for checkbox in checkboxes:
+                try:
+                    input_id = checkbox.get_attribute("id")
+                    if input_id:
+                        label = driver.find_element(By.CSS_SELECTOR, f"label[for='{input_id}']")
+                        label_text = label.get_attribute("textContent").strip()
+                        # Remove count in parentheses if present
+                        clean_label = label_text.split('(')[0].strip()
 
                         if clean_label.lower() == target_product_type.lower():
                             return checkbox, clean_label
                 except Exception as e:
-                    logging.debug(f"Error checking checkbox: {e}")
                     continue
             return None, None
 
-        # First attempt to find the checkbox
+        # Find the target checkbox
         checkboxes = find_checkboxes()
         if not checkboxes:
-            logging.warning("No product type checkboxes found after expansion")
             return None
 
         target_checkbox, target_label = find_target_checkbox(checkboxes)
 
         if not target_checkbox:
-            logging.error(f"Product type '{target_product_type}' not found even after full expansion")
             return None
-
-        logging.info(f"Selecting product type: '{target_label}'")
 
         # Scroll to and select the checkbox
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_checkbox)
-        time.sleep(1)
+        time.sleep(0.5)
         driver.execute_script("arguments[0].click();", target_checkbox)
-        logging.info(f"✓ Selected product type: {target_label}")
 
         return target_label
 
@@ -686,9 +737,35 @@ def verify_single_product_type_selection(driver, expected_product_type):
     """Verify that only the expected product type is selected in the selected filters container"""
     try:
         # Find selected filters container specifically
-        selected_container = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-filter__container--selectedFilters"))
-        )
+        selected_container_selectors = [
+            "div.valtech-carrefourar-search-result-3-x-filter__container--selectedFilters",
+            "div.valtech-carrefourar-search-result-3-x-selectedFilters",
+            "[class*='selectedFilters']",
+            "[class*='selected-filters']"
+        ]
+
+        selected_container = None
+        for selector in selected_container_selectors:
+            try:
+                selected_container = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                logging.debug(f"Found selected filters container with selector: {selector}")
+                break
+            except:
+                continue
+
+        if not selected_container:
+            logging.warning(f"⚠️ No selected filters container found with any selector")
+            # Try to check if we're on the right page by looking for product results
+            try:
+                product_count_elem = driver.find_element(By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-totalProducts--layout")
+                if product_count_elem:
+                    logging.info("✓ Found product results, filter may have been applied successfully despite missing selected filters container")
+                    return True
+            except:
+                logging.warning("⚠️ No product results found either")
+            return False
 
         # Find all selected filter labels within this container
         selected_labels = selected_container.find_elements(By.CSS_SELECTOR, "label.vtex-checkbox__label")
@@ -730,92 +807,105 @@ def verify_single_product_type_selection(driver, expected_product_type):
         logging.warning(f"Error verifying single selection: {e}")
         return False
 
-def deselect_product_type(driver, product_type):
-    """Deselect a product type by clicking on it in the selected filters container"""
+def clear_all_selected_filters(driver):
+    """Clear all selected filters using the 'Borrar Filtros' link - OPTIMIZED VERSION"""
+    try:
+        # Try to find and click "Borrar Filtros" link quickly
+        try:
+            clear_link = driver.find_element(By.CSS_SELECTOR, "a.valtech-carrefourar-search-result-3-x-clearFilter")
+            if clear_link.is_displayed() and clear_link.is_enabled():
+                driver.execute_script("arguments[0].click();", clear_link)
+                time.sleep(1)  # Short wait for filters to clear
+                return True
+        except:
+            pass
+
+        # If clear link not found, assume filters are already clear (no need for individual deselection)
+        return True
+
+    except Exception as e:
+        logging.debug(f"Error clearing filters (non-critical): {e}")
+        return True  # Don't fail the process for filter clearing issues
+
+def clear_filters_individually(driver):
+    """Clear filters by clicking on each selected filter individually"""
     try:
         # Find selected filters container
-        selected_container = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-filter__container--selectedFilters"))
-        )
+        selected_container_selectors = [
+            "div.valtech-carrefourar-search-result-3-x-filter__container--selectedFilters",
+            "div.valtech-carrefourar-search-result-3-x-selectedFilters",
+            "[class*='selectedFilters']",
+            "[class*='selected-filters']"
+        ]
+
+        selected_container = None
+        for selector in selected_container_selectors:
+            try:
+                selected_container = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                break
+            except:
+                continue
+
+        if not selected_container:
+            logging.info("No selected filters container found - filters may already be clear")
+            return True
 
         # Find all selected filter items
         selected_items = selected_container.find_elements(By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-filterItem--selected")
 
-        for item in selected_items:
+        if not selected_items:
+            logging.info("No selected filter items found - filters are clear")
+            return True
+
+        logging.info(f"Found {len(selected_items)} selected filters to clear")
+
+        # Click on each selected filter to deselect it
+        for i, item in enumerate(selected_items):
             try:
-                # Get the label text
-                label = item.find_element(By.CSS_SELECTOR, "label.vtex-checkbox__label")
-                label_text = label.get_attribute("textContent").strip()
-                clean_text = label_text.split('(')[0].strip()
+                # Scroll to the item
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
+                time.sleep(0.5)
 
-                if clean_text.lower() == product_type.lower():
-                    # Found the item to deselect - click on it
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
-                    time.sleep(1)
+                # Try multiple ways to click
+                clicked = False
+                click_methods = [
+                    lambda: driver.execute_script("arguments[0].click();", item),
+                    lambda: item.find_element(By.CSS_SELECTOR, "input[type='checkbox']").click(),
+                    lambda: item.find_element(By.CSS_SELECTOR, "label").click()
+                ]
 
-                    # Click on the item or its checkbox
+                for click_method in click_methods:
                     try:
-                        # Try clicking the item directly
-                        driver.execute_script("arguments[0].click();", item)
+                        click_method()
+                        clicked = True
+                        logging.debug(f"Clicked selected filter {i+1}")
+                        time.sleep(0.5)
+                        break
                     except:
-                        # Try clicking the checkbox
-                        try:
-                            checkbox = item.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
-                            driver.execute_script("arguments[0].click();", checkbox)
-                        except:
-                            # Try clicking the label
-                            driver.execute_script("arguments[0].click();", label)
+                        continue
 
-                    logging.info(f"✓ Deselected product type: {product_type}")
-                    time.sleep(3)  # Wait for deselection to take effect
-
-                    # Verify deselection
-                    if verify_single_product_type_selection(driver, "none"):
-                        logging.info("✓ Confirmed deselection - no product types selected")
-                    else:
-                        logging.warning("⚠️ Deselection may not have worked properly")
-
-                    return True
+                if not clicked:
+                    logging.warning(f"Could not click selected filter {i+1}")
 
             except Exception as e:
-                logging.debug(f"Error checking selected item: {e}")
+                logging.debug(f"Error clearing selected filter {i+1}: {e}")
                 continue
 
-        logging.warning(f"Could not find selected filter item for '{product_type}'")
-        return False
+        time.sleep(1)  # Wait for deselection to take effect
+
+        # Verify all filters are cleared
+        if verify_single_product_type_selection(driver, "none"):
+            logging.info("✓ Successfully cleared all filters individually")
+            return True
+        else:
+            logging.warning("⚠️ Individual filter clearing may not have worked completely")
+            return False
 
     except Exception as e:
-        logging.error(f"Error deselecting product type '{product_type}': {e}")
+        logging.error(f"Error clearing filters individually: {e}")
         return False
-    """Get total number of products from the total products element"""
-    try:
-        total_products_selectors = [
-            "div.valtech-carrefourar-search-result-3-x-totalProducts--layout",
-            ".totalProducts--layout",
-            "[class*='totalProducts']"
-        ]
-
-        for selector in total_products_selectors:
-            try:
-                total_element = driver.find_element(By.CSS_SELECTOR, selector)
-                if total_element and total_element.is_displayed():
-                    text = total_element.text.strip()
-                    # Extract number from text like "52 Productos" or "16 productos"
-                    import re
-                    match = re.search(r'(\d+)', text)
-                    if match:
-                        total = int(match.group(1))
-                        logging.info(f"✓ Found total products: {total}")
-                        return total
-            except:
-                continue
-
-        logging.warning("Could not find total products element")
-        return None
-
-    except Exception as e:
-        logging.error(f"Error getting total products: {e}")
-        return None
 
 def get_total_products(driver):
     """Get total number of products from the total products element"""
@@ -848,34 +938,24 @@ def get_total_products(driver):
         logging.error(f"Error getting total products: {e}")
         return None
 
-def extract_all_products_from_pages(driver, product_type_name):
+def extract_all_products_from_pages(driver, product_type_name, category_name):
     """Extract products from all pages for a product type"""
     try:
         all_products = []
 
         # Get total expected products
         total_expected = get_total_products(driver)
-        if total_expected:
-            logging.info(f"Expecting to extract {total_expected} products total for '{product_type_name}'")
-            # Calculate expected pages (16 products per page)
-            expected_pages = (total_expected + 15) // 16  # Ceiling division
-            logging.info(f"Calculated expected pages: {expected_pages} (16 products per page)")
-        else:
-            expected_pages = 1
+        expected_pages = (total_expected + 15) // 16 if total_expected else 1
 
         current_page = 1
         products_extracted = 0
 
         while True:
-            logging.info(f"Extracting products from page {current_page}")
-
             # Extract products from current page
-            page_products = extract_products(driver, product_type_name)
+            page_products = extract_products(driver, product_type_name, category_name)
             page_count = len(page_products)
-            logging.info(f"✓ Extracted {page_count} products from page {current_page}")
 
             if page_count == 0:
-                logging.warning(f"No products found on page {current_page}, stopping")
                 break
 
             # Add page number to products for tracking
@@ -887,27 +967,20 @@ def extract_all_products_from_pages(driver, product_type_name):
 
             # Check if we have all expected products
             if total_expected and products_extracted >= total_expected:
-                logging.info(f"✓ Reached expected total of {total_expected} products")
                 break
 
             # Check if we should continue to next page
-            # If we got less than 16 products, we're on the last page
             if page_count < 16:
-                logging.info(f"✓ Got {page_count} products (< 16), this is the last page")
                 break
 
             # Try to navigate to next page
             current_page += 1
             if not navigate_to_page(driver, current_page):
-                logging.warning(f"Could not navigate to page {current_page}, stopping")
                 break
 
-            # Safety check: don't go beyond a reasonable number of pages
-            if current_page > 50:  # Arbitrary limit to prevent infinite loops
-                logging.warning("Reached page limit (50), stopping to prevent infinite loop")
+            # Safety check
+            if current_page > 50:
                 break
-
-        logging.info(f"✓ Total extracted: {len(all_products)} products from {current_page} pages")
 
         return all_products
 
@@ -915,200 +988,204 @@ def extract_all_products_from_pages(driver, product_type_name):
         logging.error(f"Error extracting products from all pages: {e}")
         return []
 
-def save_products_to_db(products, product_type_name, category_name):
-    """Save products to producttypes collection by updating the products array"""
+def save_products_to_db(products, category_name):
+    """Save individual products to the 'products' collection in MongoDB"""
     try:
         client = MongoClient('mongodb://localhost:27017/')
         db = client['carrefour']
-        collection = db['producttypes']
+        collection = db['products']
 
-        # Remove duplicates from products array before saving
-        # Use product name as unique identifier to avoid duplicates
-        seen_names = set()
-        unique_products = []
+        saved_count = 0
         for product in products:
-            product_name = product.get('name', '').strip()
-            if product_name and product_name not in seen_names:
-                seen_names.add(product_name)
-                unique_products.append(product)
-            elif product_name in seen_names:
-                logging.debug(f"Removed duplicate product: {product_name}")
+            try:
+                # Add category and timestamp if not present
+                if 'category' not in product:
+                    product['category'] = category_name
+                if 'extracted_at' not in product:
+                    product['extracted_at'] = datetime.now()
 
-        if len(unique_products) != len(products):
-            logging.info(f"Removed {len(products) - len(unique_products)} duplicate products")
+                # Insert the product
+                result = collection.insert_one(product)
+                saved_count += 1
 
-        # First, let's check if the document exists
-        existing_doc = collection.find_one({"name": product_type_name})
-        if not existing_doc:
-            logging.warning(f"Document with name '{product_type_name}' not found in producttypes collection")
-            # Try to find similar names
-            similar_docs = list(collection.find({"name": {"$regex": product_type_name[:10], "$options": "i"}}).limit(5))
-            if similar_docs:
-                logging.info(f"Similar documents found: {[doc['name'] for doc in similar_docs]}")
-            else:
-                logging.warning("No similar documents found")
-            client.close()
-            return 0
-
-        logging.info(f"Found existing document: {existing_doc['name']} (current products: {len(existing_doc.get('products', []))})")
-
-        # Update the products array for the specific product type
-        result = collection.update_one(
-            {"name": product_type_name},  # Find document by product type name
-            {
-                "$set": {
-                    "products": unique_products,  # Replace the entire products array with unique products
-                    "last_updated": datetime.now()
-                }
-            }
-        )
+            except Exception as e:
+                continue
 
         client.close()
 
-        if result.modified_count > 0:
-            logging.info(f"✓ Updated products array for '{product_type_name}' with {len(unique_products)} unique products")
-            return len(unique_products)
-        else:
-            logging.warning(f"No document was modified for product type '{product_type_name}'")
-            return 0
+        return saved_count
 
     except Exception as e:
         logging.error(f"Error saving products to database: {e}")
         return 0
 
-def main():
-    """Main function - process ALL product types with full pagination support"""
+def process_single_category(category_data):
+    """Process a single category with its own browser instance - MODIFIED TO SAVE TO PRODUCTS COLLECTION"""
+    category_idx, category = category_data
+    category_name = category.get('name')
+    category_url = category.get('url')
+
+    # Create unique logger for this thread
+    thread_logger = logging.getLogger(f"Thread-{category_idx}")
+    thread_logger.setLevel(logging.INFO)
+
+    # Create separate driver for this category
+    user_agent = get_random_user_agent()
     driver = None
 
     try:
-        logging.info("=== INICIANDO EXTRACCIÓN COMPLETA DE PRODUCTOS ===")
-        logging.info("PASO 0: Limpiando arrays de productos en base de datos...")
+        thread_logger.info(f"🚀 Starting processing of category '{category_name}' with User-Agent: {user_agent[:50]}...")
 
-        # Clear products arrays first
-        cleared_count = clear_producttypes_arrays()
-        logging.info(f"✓ Limpiados arrays de productos para {cleared_count} tipos de producto")
+        # Initialize driver with random user agent
+        driver = setup_driver(user_agent)
 
-        logging.info("Objetivo: Extraer TODOS los productos de TODOS los tipos de producto")
-        logging.info("Incluye paginación completa para tipos con más de 16 productos")
+        # Add random delay before starting
+        random_delay()
 
-        # PASO 1: Inicialización del WebDriver
-        logging.info("PASO 1: Inicialización del WebDriver Firefox...")
-        driver = setup_driver()
+        # Navigate to category - OPTIMIZED
+        thread_logger.info(f"🚀 Loading category '{category_name}'...")
+        def navigate_with_retry():
+            driver.get(category_url)
+            time.sleep(0.5)  # Minimal delay
+            handle_cookies(driver)
 
-        # PASO 2: Obtener la primera categoría
-        logging.info("PASO 2: Obtener la primera categoría de la base de datos...")
-        category = get_first_category()
-        if not category:
-            logging.error("No se pudo obtener la primera categoría")
-            return
+        retry_with_backoff(navigate_with_retry)
+        time.sleep(1)
 
-        category_name = category.get('name')
-        category_url = category.get('url')
+        # Setup filters in one go - OPTIMIZED
+        thread_logger.info("Setting up filters...")
+        def setup_filters_with_retry():
+            open_filters_panel(driver)
+            time.sleep(0.5)
+            scroll_to_load_filters(driver)
+            time.sleep(0.5)
 
-        # PASO 3: Navegar a la categoría
-        logging.info(f"PASO 3: Navegando a la categoría '{category_name}'...")
-        driver.get(category_url)
-        time.sleep(5)
+            # Expand product types menu
+            product_types_container = expand_product_type_menu(driver)
+            if not product_types_container:
+                raise Exception("Failed to expand product types menu")
+            time.sleep(0.5)
 
-        # Handle cookies
-        handle_cookies(driver)
+            # Scroll and click "Ver más" if needed
+            scroll_and_click_ver_mas_product_types(driver, product_types_container)
+            time.sleep(0.5)
 
-        # PASO 4: Abrir panel de filtros
-        logging.info("PASO 4: Abriendo panel de filtros...")
-        open_filters_panel(driver)
+            return product_types_container
 
-        # PASO 5: Cargar filtros
-        logging.info("PASO 5: Cargando filtros...")
-        scroll_to_load_filters(driver)
-
-        # PASO 6: Expandir menú de "Tipo de Producto"
-        logging.info("PASO 6: Expandiendo menú de 'Tipo de Producto'...")
-        product_types_container = expand_product_type_menu(driver)
+        product_types_container = retry_with_backoff(setup_filters_with_retry)
         if not product_types_container:
-            logging.error("No se pudo expandir el menú de tipos de producto")
-            return
+            thread_logger.error(f"Failed to setup filters for category '{category_name}'")
+            return False
 
-        # PASO 7: Hacer scroll y buscar botón "Ver más"
-        logging.info("PASO 7: Buscando botón 'Ver más' en tipos de producto...")
-        scroll_and_click_ver_mas_product_types(driver, product_types_container)
+        # Get all product types with retry
+        def get_product_types_with_retry():
+            all_product_types = get_all_product_types(driver)
+            if not all_product_types:
+                raise Exception("Failed to get product types")
+            return all_product_types
 
-        # PASO 8: Obtener todos los tipos de producto disponibles
-        logging.info("PASO 8: Obteniendo todos los tipos de producto disponibles...")
-        all_product_types = get_all_product_types(driver)
+        all_product_types = retry_with_backoff(get_product_types_with_retry)
         if not all_product_types:
-            logging.error("No se pudieron obtener los tipos de producto")
+            return False
+
+        logging.warning(f"Found {len(all_product_types)} product types")
+
+        # Process ONLY the first 5 product types
+        total_types = min(len(all_product_types), 5)  # Limit to first 5 product types
+        all_product_types = all_product_types[:5]  # Take only first 5 product types
+        total_products_saved = 0
+
+        thread_logger.info(f"🎯 Processing ONLY the first {total_types} product types (limited for testing)")
+
+        for idx, product_type in enumerate(all_product_types, 1):
+            thread_logger.info(f"=== Processing product type {idx}/{total_types}: '{product_type}' ===")
+
+            # Quick delay between product types
+            time.sleep(0.5)
+
+            # Quick filter clearing
+            clear_all_selected_filters(driver)
+            time.sleep(0.3)
+
+            # Select product type with retry
+            def select_product_type_with_retry():
+                selected_type = select_product_type(driver, product_type)
+                if not selected_type:
+                    raise Exception(f"Could not select product type '{product_type}'")
+                return selected_type
+
+            selected_type = retry_with_backoff(select_product_type_with_retry)
+            if not selected_type:
+                continue
+
+            time.sleep(0.3)
+
+            # Apply filter
+            def apply_filter_with_retry():
+                if not apply_filter(driver):
+                    raise Exception("Could not apply filter")
+
+            retry_with_backoff(apply_filter_with_retry)
+            time.sleep(0.3)
+
+            # Extract all products from all pages with retry
+            all_products = extract_all_products_from_pages(driver, selected_type, category_name)
+
+            if all_products:
+                # Save products to 'products' collection
+                saved_count = save_products_to_db(all_products, category_name)
+                total_products_saved += saved_count
+                logging.warning(f"Saved {saved_count} products for '{selected_type}'")
+            else:
+                logging.warning(f"No products for '{selected_type}'")
+
+            # Quick cleanup for next iteration
+            clear_all_selected_filters(driver)
+            time.sleep(0.3)
+
+        logging.warning(f"Category '{category_name}' completed - {total_products_saved} total products saved")
+        return True
+
+    except Exception as e:
+        logging.error(f"Error processing category '{category_name}': {e}")
+        return False
+
+    finally:
+        if driver:
+            try:
+                driver.quit()
+                thread_logger.info(f"🛑 Driver closed for category '{category_name}'")
+            except:
+                pass
+
+def main():
+    """Main function - process ONLY ONE category and save products to 'products' collection"""
+    try:
+        logging.warning("Starting product extraction to 'products' collection")
+        logging.warning(f"Random delays: {MIN_DELAY}-{MAX_DELAY}s, Retries: {MAX_RETRIES}")
+
+        all_categories = get_all_categories()
+        if not all_categories:
+            logging.error("No categories found")
             return
 
-        logging.info(f"✓ Encontrados {len(all_product_types)} tipos de producto")
+        # Process only the first category
+        first_category = all_categories[0]
+        category_data = (0, first_category)
 
-        # PASO 9: Procesar cada tipo de producto
-        total_types = len(all_product_types)
-        for idx, product_type in enumerate(all_product_types, 1):
-            logging.info(f"=== PROCESANDO TIPO DE PRODUCTO {idx}/{total_types}: '{product_type}' ===")
+        logging.warning(f"Processing category: {first_category.get('name')}")
 
-            # Verificar que no haya tipos seleccionados antes de empezar
-            if not verify_single_product_type_selection(driver, "none"):
-                logging.info("Des-seleccionando tipos previamente seleccionados...")
-                # Try to clear all selected filters
-                try:
-                    clear_button = driver.find_element(By.CSS_SELECTOR, "a.valtech-carrefourar-search-result-3-x-clearFilter")
-                    if clear_button and clear_button.is_displayed():
-                        driver.execute_script("arguments[0].click();", clear_button)
-                        logging.info("✓ Cleared all selected filters")
-                        time.sleep(3)
-                    else:
-                        logging.warning("No clear filters button found")
-                except:
-                    logging.warning("Could not clear selected filters")
+        # Process the single category
+        success = process_single_category(category_data)
 
-            # Seleccionar el tipo de producto
-            logging.info(f"Seleccionando tipo de producto: '{product_type}'...")
-            selected_type = select_product_type(driver, product_type)
-            if not selected_type:
-                logging.warning(f"No se pudo seleccionar '{product_type}', saltando...")
-                continue
-
-            # Aplicar el filtro
-            logging.info("Aplicando el filtro...")
-            if not apply_filter(driver):
-                logging.warning(f"No se pudo aplicar el filtro para '{product_type}', saltando...")
-                continue
-
-            # Verificar selección única
-            logging.info(f"Verificando selección única para '{selected_type}'...")
-            if not verify_single_product_type_selection(driver, selected_type):
-                logging.warning(f"No se pudo verificar selección única para '{selected_type}', intentando continuar...")
-
-            # Extraer productos de todas las páginas
-            logging.info(f"Extrayendo productos para '{selected_type}'...")
-            products = extract_all_products_from_pages(driver, selected_type)
-            if not products:
-                logging.warning(f"No se pudieron extraer productos para '{selected_type}'")
-            else:
-                logging.info(f"✓ Extraídos productos del tipo '{selected_type}'")
-
-                # Guardar productos en base de datos
-                logging.info(f"Guardando productos de '{selected_type}' en base de datos...")
-                saved_count = save_products_to_db(products, selected_type, category_name)
-                logging.info(f"✓ Guardados productos en la base de datos")
-
-            # No need to deselect here anymore - we'll clear at the beginning of next iteration
-
-        logging.info("=== EXTRACCIÓN COMPLETA FINALIZADA ===")
-        logging.info(f"Procesados {total_types} tipos de producto exitosamente")
-        logging.info("El navegador permanecerá abierto para que puedas ver el resultado")
-
-        # Keep browser open for 30 seconds so user can see the result
-        time.sleep(30)
+        if success:
+            logging.warning("Category processed successfully - products saved to 'products' collection")
+        else:
+            logging.error("Category processing failed")
 
     except Exception as e:
         logging.error(f"Error en main: {e}")
         raise
-
-    finally:
-        if driver:
-            driver.quit()
-            logging.info("WebDriver closed")
 
 if __name__ == "__main__":
     main()

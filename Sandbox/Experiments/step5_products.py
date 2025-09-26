@@ -7,20 +7,59 @@ import time
 import logging
 import json
 import os
+import random
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 from pymongo import MongoClient
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Checkpoint file path
 CHECKPOINT_FILE = "carrefour_scraper_checkpoint.json"
+
+# Anti-detection constants
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
+]
+
+# Maximum concurrent browsers
+MAX_CONCURRENT_BROWSERS = 3
+
+# Random delays (in seconds)
+MIN_DELAY = 2
+MAX_DELAY = 8
+
+# Retry configuration
+MAX_RETRIES = 3
+BASE_RETRY_DELAY = 5  # Base delay in seconds for exponential backoff
+
+def retry_with_backoff(func, max_retries=MAX_RETRIES, base_delay=BASE_RETRY_DELAY, *args, **kwargs):
+    """Execute a function with exponential backoff retry logic"""
+    for attempt in range(max_retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries:
+                logging.error(f"Function {func.__name__} failed after {max_retries + 1} attempts: {e}")
+                raise e
+
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)  # Exponential backoff with jitter
+            logging.warning(f"Attempt {attempt + 1} failed for {func.__name__}: {e}. Retrying in {delay:.2f} seconds...")
+            time.sleep(delay)
+
+    return None
 
 def save_checkpoint(last_processed_category_idx, categories_since_restart):
     """Save progress checkpoint to file"""
@@ -68,6 +107,225 @@ def clear_checkpoint():
         except Exception as e:
             logging.error(f"Error clearing checkpoint: {e}")
 
+def simulate_human_behavior(driver):
+    """Simulate human-like behavior to avoid detection"""
+    try:
+        # Random scroll to simulate reading
+        scroll_amount = random.randint(200, 800)
+        driver.execute_script(f"window.scrollTo(0, {scroll_amount});")
+
+        # Random pause
+        time.sleep(random.uniform(0.5, 2.0))
+
+        # Simulate mouse movement
+        actions = ActionChains(driver)
+        # Move mouse to random position
+        actions.move_by_offset(random.randint(-100, 100), random.randint(-50, 50))
+        actions.perform()
+
+        # Another random pause
+        time.sleep(random.uniform(0.3, 1.5))
+
+    except Exception as e:
+        logging.debug(f"Could not simulate human behavior: {e}")
+
+def random_delay():
+    """Add random delay between actions"""
+    delay = random.uniform(MIN_DELAY, MAX_DELAY)
+    logging.debug(f"Random delay: {delay:.2f} seconds")
+    time.sleep(delay)
+
+def get_random_user_agent():
+    """Get a random user agent"""
+    return random.choice(USER_AGENTS)
+
+def process_single_category(category_data):
+    """Process a single category with its own browser instance"""
+    category_idx, category = category_data
+    category_name = category.get('name')
+    category_url = category.get('url')
+
+    # Create unique logger for this thread
+    thread_logger = logging.getLogger(f"Thread-{category_idx}")
+    thread_logger.setLevel(logging.INFO)
+
+    # Create separate driver for this category
+    user_agent = get_random_user_agent()
+    driver = None
+
+    try:
+        thread_logger.info(f"🚀 Starting processing of category '{category_name}' with User-Agent: {user_agent[:50]}...")
+
+        # Initialize driver with random user agent
+        driver = setup_driver(user_agent)
+
+        # Add random delay before starting
+        random_delay()
+
+        # Navigate to category with retry
+        thread_logger.info(f"Navigating to category '{category_name}'...")
+        def navigate_with_retry():
+            driver.get(category_url)
+            # Simulate human behavior
+            simulate_human_behavior(driver)
+            # Wait for page to load
+            try:
+                WebDriverWait(driver, 15).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+                thread_logger.info("Page loaded completely")
+            except:
+                thread_logger.warning("Timeout waiting for page load, continuing...")
+            # Handle cookies
+            handle_cookies(driver)
+
+        retry_with_backoff(navigate_with_retry)
+        random_delay()
+
+        # Simulate more human behavior
+        simulate_human_behavior(driver)
+
+        # Open filters panel with retry
+        thread_logger.info("Opening filters panel...")
+        def open_filters_with_retry():
+            open_filters_panel(driver)
+            random_delay()
+            # Load filters
+            scroll_to_load_filters(driver)
+
+        retry_with_backoff(open_filters_with_retry)
+        random_delay()
+
+        # Expand product types menu with retry
+        thread_logger.info("Expanding product types menu...")
+        def expand_menu_with_retry():
+            product_types_container = expand_product_type_menu(driver)
+            if not product_types_container:
+                raise Exception("Failed to expand product types menu")
+            return product_types_container
+
+        product_types_container = retry_with_backoff(expand_menu_with_retry)
+        if not product_types_container:
+            thread_logger.error(f"Failed to expand product types menu for category '{category_name}'")
+            return False
+
+        random_delay()
+        simulate_human_behavior(driver)
+
+        # Scroll and click "Ver más" with retry
+        thread_logger.info("Looking for 'Ver más' button...")
+        def scroll_ver_mas_with_retry():
+            scroll_and_click_ver_mas_product_types(driver, product_types_container)
+
+        retry_with_backoff(scroll_ver_mas_with_retry)
+        random_delay()
+
+        # Get all product types with retry
+        thread_logger.info("Getting all product types...")
+        def get_product_types_with_retry():
+            all_product_types = get_all_product_types(driver)
+            if not all_product_types:
+                raise Exception("Failed to get product types")
+            return all_product_types
+
+        all_product_types = retry_with_backoff(get_product_types_with_retry)
+        if not all_product_types:
+            thread_logger.error(f"Failed to get product types for category '{category_name}'")
+            return False
+
+        thread_logger.info(f"✓ Found {len(all_product_types)} product types")
+
+        # Process only first 5 product types for testing
+        total_types = min(len(all_product_types), 5)
+        product_types_to_process = all_product_types[:5]
+        thread_logger.info(f"🔧 TESTING MODE: Processing only first {total_types} product types")
+
+        for idx, product_type in enumerate(product_types_to_process, 1):
+            thread_logger.info(f"=== Processing product type {idx}/{total_types}: '{product_type}' ===")
+
+            # Random delay between product types
+            random_delay()
+
+            # Clear previously selected filters with retry
+            def clear_filters_with_retry():
+                if not verify_single_product_type_selection(driver, "none"):
+                    thread_logger.info("Clearing previously selected filters...")
+                    try:
+                        clear_button = driver.find_element(By.CSS_SELECTOR, "a.valtech-carrefourar-search-result-3-x-clearFilter")
+                        if clear_button and clear_button.is_displayed():
+                            driver.execute_script("arguments[0].click();", clear_button)
+                            thread_logger.info("✓ Cleared all selected filters")
+                            time.sleep(2)
+                        else:
+                            thread_logger.warning("Could not find clear button")
+                    except:
+                        thread_logger.warning("Could not clear filters")
+
+            retry_with_backoff(clear_filters_with_retry)
+
+            # Select product type with retry
+            def select_product_type_with_retry():
+                selected_type = select_product_type(driver, product_type)
+                if not selected_type:
+                    raise Exception(f"Could not select product type '{product_type}'")
+                return selected_type
+
+            selected_type = retry_with_backoff(select_product_type_with_retry)
+            if not selected_type:
+                thread_logger.warning(f"Could not select product type '{product_type}', skipping...")
+                continue
+
+            random_delay()
+            simulate_human_behavior(driver)
+
+            # Apply filter with retry
+            def apply_filter_with_retry():
+                if not apply_filter(driver):
+                    raise Exception(f"Could not apply filter for '{product_type}'")
+
+            retry_with_backoff(apply_filter_with_retry)
+            random_delay()
+
+            # Extract all products from all pages with retry
+            thread_logger.info(f"Extracting products for '{product_type}'...")
+            def extract_products_with_retry():
+                all_products = extract_all_products_from_pages(driver, selected_type)
+                if not all_products:
+                    raise Exception(f"No products extracted for '{selected_type}'")
+                return all_products
+
+            all_products = retry_with_backoff(extract_products_with_retry)
+
+            if all_products:
+                # Save to database
+                saved_count = save_products_to_db(all_products, selected_type, category_name)
+                thread_logger.info(f"✓ Saved {saved_count} products for '{selected_type}'")
+            else:
+                thread_logger.warning(f"No products extracted for '{selected_type}'")
+
+            # Deselect current product type with retry
+            def deselect_with_retry():
+                if not deselect_product_type(driver, selected_type):
+                    thread_logger.warning(f"Could not deselect '{selected_type}'")
+
+            retry_with_backoff(deselect_with_retry)
+            random_delay()
+
+        thread_logger.info(f"✅ Category '{category_name}' processing completed successfully")
+        return True
+
+    except Exception as e:
+        thread_logger.error(f"❌ Error processing category '{category_name}': {e}")
+        return False
+
+    finally:
+        if driver:
+            try:
+                driver.quit()
+                thread_logger.info(f"🛑 Driver closed for category '{category_name}'")
+            except:
+                pass
+
 def clear_producttypes_arrays():
     """Clear all products arrays in the producttypes collection"""
     try:
@@ -90,18 +348,36 @@ def clear_producttypes_arrays():
         logging.error(f"Error clearing producttypes arrays: {e}")
         return 0
 
-def setup_driver():
-    """Setup Firefox WebDriver (NO HEADLESS para que el usuario pueda ver)"""
+def setup_driver(user_agent=None):
+    """Setup Firefox WebDriver with anti-detection measures"""
     firefox_options = Options()
     # NO headless - el usuario quiere ver el proceso
     firefox_options.add_argument("--no-sandbox")
     firefox_options.add_argument("--disable-dev-shm-usage")
     firefox_options.add_argument("--window-size=1920,1080")
 
+    # Anti-detection measures
+    if user_agent:
+        firefox_options.set_preference("general.useragent.override", user_agent)
+
+    # Disable WebRTC to prevent IP leaks
+    firefox_options.set_preference("media.peerconnection.enabled", False)
+
+    # Randomize other preferences to avoid fingerprinting
+    firefox_options.set_preference("dom.webdriver.enabled", False)
+    firefox_options.set_preference('useAutomationExtension', False)
+
+    # Disable images to speed up loading (optional)
+    # firefox_options.set_preference("permissions.default.image", 2)
+
     geckodriver_path = r"d:\dev\caminando-onlinev8\geckodriver_temp\geckodriver.exe"
     service = Service(geckodriver_path)
     driver = webdriver.Firefox(service=service, options=firefox_options)
-    logging.info("WebDriver initialized successfully (NO HEADLESS)")
+
+    # Execute script to remove webdriver property
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+    logging.info("WebDriver initialized successfully with anti-detection measures")
     return driver
 
 def handle_cookies(driver):
@@ -112,7 +388,7 @@ def handle_cookies(driver):
             try:
                 btn.click()
                 logging.info("Clicked cookie accept button")
-                time.sleep(2)
+                time.sleep(1)  # Reduced from 2 to 1 second
                 break
             except:
                 continue
@@ -127,14 +403,14 @@ def open_filters_panel(driver):
         )
         filters_button.click()
         logging.info("Opened filters panel")
-        time.sleep(2)
+        time.sleep(1)  # Reduced from 2 to 1 second
     except:
         logging.info("Filters panel already open or no button found")
 
 def scroll_to_load_filters(driver):
     """Scroll down to ensure filters are loaded"""
     driver.execute_script("window.scrollTo(0, 500);")
-    time.sleep(3)
+    time.sleep(1)  # Reduced from 3 to 1 second
     logging.info("Scrolled down to load filters")
 
 def get_all_categories():
@@ -249,7 +525,7 @@ def scroll_and_click_ver_mas_product_types(driver, product_types_container):
                             driver.execute_script("arguments[0].click();", btn)
                             logging.info(f"✓ Clicked 'Ver más' button for product types: '{btn.text}'")
                             button_clicked = True
-                            time.sleep(2)  # Wait for all items to load
+                            time.sleep(1)  # Reduced from 2 to 1 second
                             break
 
                 if button_clicked:
@@ -264,7 +540,7 @@ def scroll_and_click_ver_mas_product_types(driver, product_types_container):
 
         # Scroll again to ensure all items are visible
         driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", product_types_container)
-        time.sleep(2)
+        time.sleep(1)  # Reduced from 2 to 1 second
         logging.info("✓ Product types list should now be fully visible")
 
         return True
@@ -351,10 +627,10 @@ def apply_filter(driver):
                     text = element.text.lower()
                     if "aplicar" in text:
                         driver.execute_script("arguments[0].scrollIntoView();", element)
-                        time.sleep(1)
+                        time.sleep(0.5)  # Reduced from 1 to 0.5
                         driver.execute_script("arguments[0].click();", element)
                         logging.info("✓ Filter applied")
-                        time.sleep(3)  # Wait for filter to be applied
+                        time.sleep(1)  # Reduced from 3 to 1 second
                         return True
 
             except Exception as e:
@@ -371,8 +647,15 @@ def apply_filter(driver):
 def extract_products(driver, product_type_name):
     """Extraer productos de la página filtrada"""
     try:
-        # Wait for products to load
-        time.sleep(3)
+        # Wait for products to load using WebDriverWait instead of fixed sleep
+        try:
+            WebDriverWait(driver, 5).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "[data-testid*='product'], .product-container, .vtex-product-summary")) > 0
+            )
+            logging.info("Productos cargados")
+        except:
+            logging.warning("Timeout esperando productos, intentando extraer de todos modos...")
+            time.sleep(1)  # Reduced from 3 to 1 second
 
         # Try multiple selectors for product containers
         product_selectors = [
@@ -598,7 +881,7 @@ def navigate_to_page(driver, page_number):
 
                     driver.execute_script("arguments[0].click();", page_button)
                     logging.info(f"✓ Navigated to page {page_number} using page button")
-                    time.sleep(3)
+                    time.sleep(1)  # Reduced from 3 to 1 second
                     return True
         except:
             logging.debug(f"Could not find page {page_number} button, trying Next button approach")
@@ -640,7 +923,7 @@ def navigate_to_page(driver, page_number):
                 driver.execute_script("arguments[0].click();", next_button)
                 logging.info(f"✓ Clicked Next button to go from page {current_page} to {current_page + 1}")
                 current_page += 1
-                time.sleep(3)
+                time.sleep(1)  # Reduced from 3 to 1 second
 
             except Exception as e:
                 logging.error(f"Error clicking Next button at page {current_page}: {e}")
@@ -846,7 +1129,7 @@ def deselect_product_type(driver, product_type):
                             driver.execute_script("arguments[0].click();", label)
 
                     logging.info(f"✓ Deselected product type: {product_type}")
-                    time.sleep(3)  # Wait for deselection to take effect
+                    time.sleep(1)  # Reduced from 3 to 1 second
 
                     # Verify deselection
                     if verify_single_product_type_selection(driver, "none"):
@@ -1056,26 +1339,21 @@ def save_products_to_db(products, product_type_name, category_name):
         return 0
 
 def main():
-    """Main function - process ALL product types with full pagination support"""
-    driver = None
-
+    """Main function - process ALL product types with parallel processing and anti-detection"""
     try:
-        logging.info("=== INICIANDO EXTRACCIÓN COMPLETA DE PRODUCTOS ===")
-        logging.info("PASO 0: Limpiando arrays de productos en base de datos...")
+        logging.info("=== INICIANDO EXTRACCIÓN PARALELA DE PRODUCTOS ===")
+        logging.info(f"Configuración: Máximo {MAX_CONCURRENT_BROWSERS} navegadores concurrentes")
+        logging.info(f"Delays aleatorios: {MIN_DELAY}-{MAX_DELAY} segundos")
+        logging.info(f"Sistema de reintentos: {MAX_RETRIES} reintentos con backoff exponencial")
+        logging.info("Medidas anti-detección: User-Agents rotativos, comportamiento humano simulado")
 
-        # Clear products arrays first
+        # PASO 0: Limpiar arrays de productos en base de datos
+        logging.info("PASO 0: Limpiando arrays de productos en base de datos...")
         cleared_count = clear_producttypes_arrays()
         logging.info(f"✓ Limpiados arrays de productos para {cleared_count} tipos de producto")
 
-        logging.info("Objetivo: Extraer TODOS los productos de TODOS los tipos de producto")
-        logging.info("Incluye paginación completa para tipos con más de 16 productos")
-
-        # PASO 1: Inicialización del WebDriver
-        logging.info("PASO 1: Inicialización del WebDriver Firefox...")
-        driver = setup_driver()
-
-        # PASO 2: Obtener todas las categorías
-        logging.info("PASO 2: Obtener todas las categorías de la base de datos...")
+        # PASO 1: Obtener todas las categorías
+        logging.info("PASO 1: Obtener todas las categorías de la base de datos...")
         all_categories = get_all_categories()
         if not all_categories:
             logging.error("No se pudieron obtener las categorías")
@@ -1084,188 +1362,86 @@ def main():
         total_categories = len(all_categories)
         logging.info(f"✓ Encontradas {total_categories} categorías para procesar")
 
-        # PASO 2.1: Verificar checkpoint para reanudar desde donde se quedó
+        # PASO 2: Verificar checkpoint para reanudar desde donde se quedó
         checkpoint = load_checkpoint()
         start_idx = 0
-        categories_since_restart = 0
 
         if checkpoint:
-            last_processed_idx, categories_since_restart = checkpoint
-            start_idx = last_processed_idx + 1  # Continuar desde la siguiente categoría
+            last_processed_idx, _ = checkpoint
+            start_idx = last_processed_idx + 1
 
             if start_idx >= total_categories:
                 logging.info("🎉 Todas las categorías ya fueron procesadas completamente!")
-                clear_checkpoint()  # Limpiar checkpoint ya que terminó
+                clear_checkpoint()
                 return
 
             logging.info(f"▶️ Reanudando procesamiento desde categoría {start_idx + 1}/{total_categories}")
         else:
             logging.info("▶️ Iniciando procesamiento desde el principio")
 
-        # Configuración para reinicio periódico del navegador
-        CATEGORIES_BEFORE_RESTART = 3  # Reiniciar navegador cada 3 categorías
+        # PASO 3: Procesar categorías en paralelo
+        logging.info("PASO 3: Procesando categorías en paralelo...")
 
-        # PASO 3: Procesar cada categoría
-        for cat_idx in range(start_idx, total_categories):
-            category = all_categories[cat_idx]
-            # PASO 3.x: Procesar categoría con manejo de errores
-            try:
+        # Prepare categories to process
+        categories_to_process = [(i, cat) for i, cat in enumerate(all_categories[start_idx:], start_idx)]
+
+        # Process categories in parallel with limited concurrency
+        successful_categories = 0
+        failed_categories = 0
+
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_BROWSERS) as executor:
+            # Submit all tasks
+            future_to_category = {
+                executor.submit(process_single_category, category_data): category_data
+                for category_data in categories_to_process
+            }
+
+            # Process completed tasks
+            for future in as_completed(future_to_category):
+                category_idx, category = future_to_category[future]
                 category_name = category.get('name')
-                category_url = category.get('url')
 
-                # Verificar si necesitamos reiniciar el navegador
-                if categories_since_restart >= CATEGORIES_BEFORE_RESTART:
-                    logging.info(f"🔄 Reiniciando navegador después de {categories_since_restart} categorías procesadas...")
-                    try:
-                        driver.quit()
-                        time.sleep(2)
-                        driver = setup_driver()
-                        categories_since_restart = 0
-                        logging.info("✅ Navegador reiniciado exitosamente")
-                    except Exception as e:
-                        logging.error(f"❌ Error al reiniciar navegador: {e}")
-                        logging.info("Intentando continuar con el navegador actual...")
+                try:
+                    success = future.result()
+                    if success:
+                        successful_categories += 1
+                        logging.info(f"✅ Categoría '{category_name}' procesada exitosamente")
 
-                logging.info(f"PASO 3.{cat_idx}: Procesando categoría '{category_name}'...")
-
-                # PASO 3.x.1: Navegar a la categoría
-                logging.info(f"Navegando a la categoría '{category_name}'...")
-                driver.get(category_url)
-                time.sleep(5)
-
-                # Handle cookies
-                handle_cookies(driver)
-
-                # Incrementar contador de categorías procesadas
-                categories_since_restart += 1
-
-                # PASO 4.x: Abrir panel de filtros
-                logging.info("PASO 4: Abriendo panel de filtros...")
-                open_filters_panel(driver)
-
-                # PASO 5.x: Cargar filtros
-                logging.info("PASO 5: Cargando filtros...")
-                scroll_to_load_filters(driver)
-
-                # PASO 6.x: Expandir menú de "Tipo de Producto"
-                logging.info("PASO 6: Expandiendo menú de 'Tipo de Producto'...")
-                product_types_container = expand_product_type_menu(driver)
-                if not product_types_container:
-                    logging.error("No se pudo expandir el menú de tipos de producto")
-                    continue
-
-                # PASO 7.x: Hacer scroll y buscar botón "Ver más"
-                logging.info("PASO 7: Buscando botón 'Ver más' en tipos de producto...")
-                scroll_and_click_ver_mas_product_types(driver, product_types_container)
-
-                # PASO 8.x: Obtener todos los tipos de producto disponibles
-                logging.info("PASO 8: Obteniendo todos los tipos de producto disponibles...")
-                all_product_types = get_all_product_types(driver)
-                if not all_product_types:
-                    logging.error("No se pudieron obtener los tipos de producto")
-                    continue
-
-                logging.info(f"✓ Encontrados {len(all_product_types)} tipos de producto")
-
-                # PASO 9.x: Procesar cada tipo de producto
-                total_types = len(all_product_types)
-                for idx, product_type in enumerate(all_product_types, 1):
-                    logging.info(f"=== PROCESANDO TIPO DE PRODUCTO {idx}/{total_types}: '{product_type}' ===")
-
-                    # Verificar que no haya tipos seleccionados antes de empezar
-                    if not verify_single_product_type_selection(driver, "none"):
-                        logging.info("Des-seleccionando tipos previamente seleccionados...")
-                        # Try to clear all selected filters
-                        try:
-                            clear_button = driver.find_element(By.CSS_SELECTOR, "a.valtech-carrefourar-search-result-3-x-clearFilter")
-                            if clear_button and clear_button.is_displayed():
-                                driver.execute_script("arguments[0].click();", clear_button)
-                                logging.info("✓ Cleared all selected filters")
-                                time.sleep(3)
-                            else:
-                                logging.warning("No clear filters button found")
-                        except:
-                            logging.warning("Could not clear selected filters")
-
-                    # Seleccionar el tipo de producto
-                    logging.info(f"Seleccionando tipo de producto: '{product_type}'...")
-                    selected_type = select_product_type(driver, product_type)
-                    if not selected_type:
-                        logging.warning(f"No se pudo seleccionar '{product_type}', saltando...")
-                        continue
-
-                    # Aplicar el filtro
-                    logging.info("Aplicando el filtro...")
-                    if not apply_filter(driver):
-                        logging.warning(f"No se pudo aplicar el filtro para '{product_type}', saltando...")
-                        continue
-
-                    # Esperar a que se aplique el filtro y se recargue la página
-                    logging.info("Esperando a que se aplique el filtro...")
-                    time.sleep(5)
-
-                    # Verificar selección única
-                    logging.info(f"Verificando selección única para '{selected_type}'...")
-                    if not verify_single_product_type_selection(driver, selected_type):
-                        logging.error(f"❌ No se pudo verificar selección única para '{selected_type}', saltando este tipo de producto...")
-                        continue
-
-                    # Extraer productos de todas las páginas
-                    logging.info(f"Extrayendo productos para '{selected_type}'...")
-                    products = extract_all_products_from_pages(driver, selected_type)
-                    if not products:
-                        logging.warning(f"No se pudieron extraer productos para '{selected_type}'")
+                        # Save checkpoint after each successful category
+                        save_checkpoint(category_idx, 0)
                     else:
-                        logging.info(f"✓ Extraídos productos del tipo '{selected_type}'")
+                        failed_categories += 1
+                        logging.error(f"❌ Categoría '{category_name}' falló")
 
-                        # Guardar productos en base de datos
-                        logging.info(f"Guardando productos de '{selected_type}' en base de datos...")
-                        saved_count = save_products_to_db(products, selected_type, category_name)
-                        logging.info(f"✓ Guardados productos en la base de datos")
+                except Exception as e:
+                    failed_categories += 1
+                    logging.error(f"❌ Error procesando categoría '{category_name}': {e}")
 
-                    # No need to deselect here anymore - we'll clear at the beginning of next iteration
+                # Add delay between category completions to avoid overwhelming the server
+                random_delay()
 
-            except Exception as e:
-                logging.error(f"❌ Error procesando categoría '{category_name}': {e}")
-                logging.warning(f"Saltando categoría '{category_name}' y continuando con la siguiente...")
+        # PASO 4: Resultados finales
+        logging.info("=== EXTRACCIÓN PARALELA FINALIZADA ===")
+        logging.info(f"✅ Categorías procesadas exitosamente: {successful_categories}")
+        logging.info(f"❌ Categorías fallidas: {failed_categories}")
+        logging.info(f"📊 Total categorías: {total_categories}")
 
-                # Intentar reiniciar el navegador si hay problemas de conexión
-                if "connection" in str(e).lower() or "webdriver" in str(e).lower():
-                    try:
-                        logging.info("🔄 Intentando reiniciar navegador debido a error de conexión...")
-                        driver.quit()
-                        time.sleep(3)
-                        driver = setup_driver()
-                        categories_since_restart = 0
-                        logging.info("✅ Navegador reiniciado después de error de conexión")
-                    except Exception as restart_error:
-                        logging.error(f"❌ Error al reiniciar navegador: {restart_error}")
-                        logging.warning("Continuando con el procesamiento...")
+        if successful_categories > 0:
+            logging.info("🎉 El navegador permanecerá abierto para que puedas ver el resultado")
+            # Keep one browser open for 30 seconds to show results
+            demo_driver = setup_driver()
+            try:
+                time.sleep(30)
+            finally:
+                demo_driver.quit()
 
-                continue
-
-            # ✅ Categoría procesada exitosamente - guardar checkpoint
-            save_checkpoint(cat_idx, categories_since_restart)
-            logging.info(f"✅ Categoría '{category_name}' completada y checkpoint guardado")
-
-        logging.info("=== EXTRACCIÓN COMPLETA FINALIZADA ===")
-        logging.info(f"Procesadas {len(all_categories)} categorías exitosamente")
-        logging.info("El navegador permanecerá abierto para que puedas ver el resultado")
-
-        # Limpiar checkpoint ya que terminó completamente
-        clear_checkpoint()
-
-        # Keep browser open for 30 seconds so user can see the result
-        time.sleep(30)
+        # Limpiar checkpoint si todo terminó
+        if successful_categories == len(categories_to_process):
+            clear_checkpoint()
 
     except Exception as e:
         logging.error(f"Error en main: {e}")
         raise
-
-    finally:
-        if driver:
-            driver.quit()
-            logging.info("WebDriver closed")
 
 if __name__ == "__main__":
     main()
