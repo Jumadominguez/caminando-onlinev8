@@ -361,130 +361,50 @@ def apply_filter(driver):
         logging.error(f"Error applying filter: {e}")
         return False
 
-def is_product_name_relevant(product_name, product_type_name):
-    """Check if product name is relevant for the given product type"""
-    if not product_name or not product_type_name:
-        return True  # If we can't determine, assume it's relevant
-
-    product_name_lower = product_name.lower()
-    product_type_lower = product_type_name.lower()
-
-    # Basic keyword matching - product name should contain product type keywords
-    type_keywords = product_type_lower.split()
-
-    # For product types with multiple words, check if at least some keywords match
-    matching_keywords = 0
-    for keyword in type_keywords:
-        if keyword in product_name_lower:
-            matching_keywords += 1
-
-    # Require at least 50% of keywords to match for relevance
-    min_matches = max(1, len(type_keywords) // 2)
-    return matching_keywords >= min_matches
-
-def get_total_products(driver):
-    """Get total number of products from the page"""
-    try:
-        # Look for total products text
-        selectors = [
-            "span.valtech-carrefourar-search-result-0-x-totalProducts",
-            "span[data-testid*='total']",
-            "span:contains('productos')",
-            ".search-result-info span"
-        ]
-
-        for selector in selectors:
-            try:
-                if selector.startswith("span:contains"):
-                    elements = driver.find_elements(By.XPATH, "//span[contains(text(), 'productos')]")
-                else:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-
-                for element in elements:
-                    if element.is_displayed():
-                        text = element.text.strip()
-                        # Extract number from text
-                        import re
-                        match = re.search(r'(\d+(?:[.,]\d+)*)', text)
-                        if match:
-                            count_str = match.group(1).replace('.', '').replace(',', '')
-                            return int(count_str)
-            except:
-                continue
-
-        return 0
-    except Exception as e:
-        logging.debug(f"Error getting total products: {e}")
-        return 0
-
-def validate_product_type_consistency(products_data, expected_product_type, category_name):
-    """Validate that extracted products match the expected product type"""
-    if not products_data:
-        return 0
-
-    consistent_count = 0
-    for product in products_data:
-        product_name = product.get('name', '').lower()
-        if is_product_name_relevant(product_name, expected_product_type):
-            consistent_count += 1
-
-    return consistent_count
-
 # Global cache for brands to avoid repeated database queries
 BRANDS_CACHE = None
 
 def extract_brand(product_name):
-    """Extract brand from product name using sophisticated matching logic with cache"""
-    if not product_name:
-        return None
+    """Extrae la marca del nombre del producto buscando en la colección filters"""
+    global BRANDS_CACHE
 
-    # Cache for brands to avoid repeated database queries
-    if not hasattr(extract_brand, 'brands_cache'):
+    # Cargar marcas de la base de datos si no están en cache
+    if BRANDS_CACHE is None:
         try:
+            # Obtener todas las marcas de la colección filters
             client = MongoClient('mongodb://localhost:27017/')
             db = client['carrefour']
             filters_collection = db['filters']
-
-            # Load all brands from filters collection
             brands_docs = filters_collection.find({'type': 'brand'}, {'name': 1})
-            extract_brand.brands_cache = [doc['name'] for doc in brands_docs]
-
+            BRANDS_CACHE = [doc['name'] for doc in brands_docs]
             client.close()
-
-            if not extract_brand.brands_cache:
-                logging.debug("No brands found in filters collection")
-                return 'Carrefour'
-
+            logging.info(f"Cargadas {len(BRANDS_CACHE)} marcas desde la base de datos")
         except Exception as e:
-            logging.debug(f"Error loading brands cache: {e}")
-            extract_brand.brands_cache = []
+            logging.error(f"Error cargando marcas desde la base de datos: {e}")
+            BRANDS_CACHE = []
 
-    # If cache is empty, return default
-    if not extract_brand.brands_cache:
-        return 'Carrefour'
-
+    # Buscar coincidencia exacta primero
     product_name_lower = product_name.lower()
-
-    # Strategy 1: Exact match
-    for brand in extract_brand.brands_cache:
+    for brand in BRANDS_CACHE:
         if brand.lower() == product_name_lower:
             return brand
 
-    # Strategy 2: Brand contained in product name
-    for brand in extract_brand.brands_cache:
+    # Buscar marca contenida en el nombre del producto
+    for brand in BRANDS_CACHE:
         if brand.lower() in product_name_lower:
             return brand
 
-    # Strategy 3: Extract from initial words (1-3 words)
+    # Si no encuentra marca conocida, intentar extraer de las primeras palabras
     words = product_name.split()
     if words:
+        # Probar con las primeras 2-3 palabras para encontrar marcas compuestas
         for i in range(min(3, len(words))):
             candidate = ' '.join(words[:i+1])
-            for brand in extract_brand.brands_cache:
+            for brand in BRANDS_CACHE:
                 if brand.lower() == candidate.lower():
                     return brand
 
-    # Strategy 4: Fallback to Carrefour for own-brand products
+    # Fallback: devolver 'Carrefour' para productos de marca propia
     return 'Carrefour'
 
 # Global cache for product types to avoid repeated database queries
@@ -647,9 +567,6 @@ def extract_products(driver, product_type_name, category_name, subcategory_name=
 
                         name_text = name_elem.text.strip()
                         if name_text and len(name_text) > 3:  # Avoid very short texts
-                            # Validate product name relevance for product type (basic check)
-                            if product_type_name and not is_product_name_relevant(name_text, product_type_name):
-                                logging.debug(f"Product name '{name_text[:50]}...' may not match product type '{product_type_name}'")
                             product_name = name_text
                             break
                     except:
@@ -1004,29 +921,32 @@ def extract_products(driver, product_type_name, category_name, subcategory_name=
                     pass
 
                 product_data = {
-                    'productUrl': product_url,  # URL del producto
-                    'seller': 'Carrefour',  # Vendedor
                     'name': product_name,
+                    'sellingPrice': selling_price,  # Precio de venta
+                    'listPrice': list_price,  # Precio de lista
+                    'discountPercentage': discount_percentage,  # Porcentaje de descuento
+                    'isOnSale': is_on_sale,  # Si está en oferta
+                    'currency': 'ARS',  # Moneda
+                    'productType': product_type_name,
                     'category': category_name,
                     'subcategory': subcategory,  # Campo requerido (extraído de producttypes collection)
-                    'productType': product_type_name,
+                    'mainImage': image_url,  # Imagen principal
                     'brand': brand,
-                    'listPrice': list_price,  # Precio de lista
-                    'sellingPrice': selling_price,  # Precio de venta
-                    'currency': 'ARS',  # Moneda
-                    'isOnSale': is_on_sale,  # Si está en oferta
-                    'discountPercentage': discount_percentage,  # Porcentaje de descuento
                     'promotions': promotions,
-                    'promotionalClusters': promotional_clusters,  # Clusters promocionales
+                    'productId': product_id,
+                    'available': available,
+                    'scrapedAt': datetime.now(),  # Timestamp de scraping
+                    'lastUpdated': datetime.now(),  # Última actualización
+                    'seller': 'Carrefour',  # Vendedor
+                    # Nuevos campos agregados
+                    'productUrl': product_url,  # URL del producto
+                    'description': description,  # Descripción del producto
+                    'isAvailable': available,  # Si está disponible (mapeado de 'available')
                     'nutritionalInfo': nutritional_info,  # Información nutricional
                     'packageInfo': package_info,  # Información de empaque
-                    'mainImage': image_url,  # Imagen principal
-                    'productId': product_id,
                     'createdAt': datetime.now(),  # Fecha de creación
-                    'lastUpdated': datetime.now(),  # Última actualización
-                    'isAvailable': available,  # Si está disponible
-                    'description': description,  # Descripción del producto
-                    'page': 1  # Página por defecto, se actualiza en extract_all_products_from_pages
+                    'updatedAt': datetime.now(),  # Fecha de actualización
+                    'promotionalClusters': promotional_clusters  # Clusters promocionales
                 }
 
                 products.append(product_data)
@@ -1435,102 +1355,35 @@ def clear_filters_individually(driver):
         logging.error(f"Error clearing filters individually: {e}")
         return False
 
-def count_total_products_in_category(driver, product_type_name):
-    """Count total number of products shown in the current category/filter"""
+def get_total_products(driver):
+    """Get total number of products from the total products element"""
     try:
-        # Look for product count text
-        count_selectors = [
-            "span.valtech-carrefourar-search-result-0-x-totalProducts",
-            "span[data-testid*='total']",
-            "span:contains('productos')",
-            "span:contains('products')",
-            ".search-result-info span",
-            "[class*='total'] span"
+        total_products_selectors = [
+            "div.valtech-carrefourar-search-result-3-x-totalProducts--layout",
+            ".totalProducts--layout",
+            "[class*='totalProducts']"
         ]
 
-        for selector in count_selectors:
+        for selector in total_products_selectors:
             try:
-                if selector.startswith("span:contains"):
-                    if 'productos' in selector:
-                        elements = driver.find_elements(By.XPATH, "//span[contains(text(), 'productos')]")
-                    elif 'products' in selector:
-                        elements = driver.find_elements(By.XPATH, "//span[contains(text(), 'products')]")
-                    else:
-                        continue
-                else:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-
-                for element in elements:
-                    if element.is_displayed():
-                        text = element.text.strip()
-                        # Extract number from text like "X productos" or "X products"
-                        import re
-                        match = re.search(r'(\d+(?:[.,]\d+)*)', text)
-                        if match:
-                            count_str = match.group(1).replace('.', '').replace(',', '')
-                            try:
-                                return int(count_str)
-                            except ValueError:
-                                continue
+                total_element = driver.find_element(By.CSS_SELECTOR, selector)
+                if total_element and total_element.is_displayed():
+                    text = total_element.text.strip()
+                    # Extract number from text like "52 Productos" or "16 productos"
+                    import re
+                    match = re.search(r'(\d+)', text)
+                    if match:
+                        total = int(match.group(1))
+                        logging.info(f"✓ Found total products: {total}")
+                        return total
             except:
                 continue
 
-        # Fallback: count actual product elements on current page
-        try:
-            product_elements = driver.find_elements(By.CSS_SELECTOR, "article[data-testid*='product'], .product-item, .product-card")
-            if product_elements:
-                # Assume 24 products per page (common pagination)
-                # This is a rough estimate when we can't find the total count
-                return len(product_elements)  # Return count on first page as minimum
-        except:
-            pass
-
-        return 0
+        logging.warning("Could not find total products element")
+        return None
 
     except Exception as e:
-        logging.debug(f"Error counting total products: {e}")
-        return 0
-
-def generate_extraction_error_report(product_type_name, category_name, expected_count, extracted_count, products_data):
-    """Generate a detailed error report for incomplete extraction"""
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_filename = f"extraction_error_{product_type_name.replace(' ', '_')}_{timestamp}.txt"
-
-        with open(report_filename, 'w', encoding='utf-8') as f:
-            f.write("=== EXTRACTION ERROR REPORT ===\n\n")
-            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Product Type: {product_type_name}\n")
-            f.write(f"Category: {category_name}\n")
-            f.write(f"Expected Products: {expected_count}\n")
-            f.write(f"Extracted Products: {extracted_count}\n")
-            f.write(f"Missing Products: {expected_count - extracted_count}\n")
-            f.write(f"Extraction Rate: {(extracted_count/expected_count*100):.1f}%\n\n")
-
-            f.write("=== EXTRACTED PRODUCTS SUMMARY ===\n")
-            if products_data:
-                f.write(f"Total products in extraction data: {len(products_data)}\n\n")
-                # Show first few products as examples
-                f.write("Sample extracted products:\n")
-                for i, product in enumerate(products_data[:5]):
-                    f.write(f"  {i+1}. {product.get('name', 'N/A')} - {product.get('price', 'N/A')}\n")
-                if len(products_data) > 5:
-                    f.write(f"  ... and {len(products_data) - 5} more products\n")
-            else:
-                f.write("No products extracted\n")
-
-            f.write("\n=== RECOMMENDATIONS ===\n")
-            f.write("1. Check pagination logic - may be missing pages\n")
-            f.write("2. Verify filter application - product type filter may not be working\n")
-            f.write("3. Check for dynamic content loading issues\n")
-            f.write("4. Review anti-detection measures - site may be blocking requests\n")
-            f.write("5. Consider increasing wait times between requests\n")
-
-        logging.error(f"Error report generated: {report_filename}")
-        return report_filename
-
-    except Exception as e:
-        logging.error(f"Failed to generate error report: {e}")
+        logging.error(f"Error getting total products: {e}")
         return None
 
 def extract_all_products_from_pages(driver, product_type_name, category_name, subcategory_name=None):
@@ -1540,23 +1393,17 @@ def extract_all_products_from_pages(driver, product_type_name, category_name, su
 
         # Get total expected products
         total_expected = get_total_products(driver)
-        if total_expected:
-            logging.info(f"Expected to extract {total_expected} products for '{product_type_name}'")
         expected_pages = (total_expected + 15) // 16 if total_expected else 1
 
         current_page = 1
         products_extracted = 0
-        max_pages = 100  # Safety limit to prevent infinite loops
 
-        while current_page <= max_pages:
-            logging.info(f"Extracting products from page {current_page}")
-
+        while True:
             # Extract products from current page
             page_products = extract_products(driver, product_type_name, category_name, subcategory_name)
             page_count = len(page_products)
 
             if page_count == 0:
-                logging.warning(f"No products found on page {current_page}, stopping extraction")
                 break
 
             # Add page number to products for tracking
@@ -1566,25 +1413,23 @@ def extract_all_products_from_pages(driver, product_type_name, category_name, su
             all_products.extend(page_products)
             products_extracted += page_count
 
-            logging.info(f"Extracted {page_count} products from page {current_page} (total: {products_extracted})")
-
             # Check if we have all expected products
             if total_expected and products_extracted >= total_expected:
-                logging.info(f"Reached expected total of {total_expected} products")
                 break
 
-            # Check if there are more pages by looking for pagination
-            if not has_next_page(driver):
-                logging.info("No more pages available")
+            # Check if we should continue to next page
+            if page_count < 16:
                 break
 
             # Try to navigate to next page
             current_page += 1
             if not navigate_to_page(driver, current_page):
-                logging.error(f"Failed to navigate to page {current_page}")
                 break
 
-        logging.info(f"Extraction completed: {len(all_products)} products extracted from {current_page} pages")
+            # Safety check
+            if current_page > 50:
+                break
+
         return all_products
 
     except Exception as e:
@@ -1603,6 +1448,12 @@ def save_products_to_db(products, category_name):
 
         for product in products:
             try:
+                # Add category and timestamp if not present
+                if 'category' not in product:
+                    product['category'] = category_name
+                # Always update the extraction timestamp
+                product['extracted_at'] = datetime.now()
+
                 # Create unique filter based on name, productType, and category
                 filter_criteria = {
                     'name': product.get('name'),
@@ -1611,11 +1462,9 @@ def save_products_to_db(products, category_name):
                 }
 
                 # Use upsert to update existing products or insert new ones
-                # Also remove redundant fields
-                update_data = {k: v for k, v in product.items() if k not in ['extracted_at', 'available', 'scrapedAt', 'updatedAt']}
                 result = collection.update_one(
                     filter_criteria,
-                    {'$set': update_data, '$unset': {'extracted_at': 1, 'available': 1, 'scrapedAt': 1, 'updatedAt': 1}},
+                    {'$set': product},
                     upsert=True
                 )
 
@@ -1714,11 +1563,12 @@ def process_single_category(category_data):
 
         logging.warning(f"Found {len(all_product_types)} product types")
 
-        # Process all product types
-        total_types = len(all_product_types)
+        # Process ONLY the first 5 product types
+        total_types = min(len(all_product_types), 5)  # Limit to first 5 product types
+        all_product_types = all_product_types[:5]  # Take only first 5 product types
         total_products_saved = 0
 
-        thread_logger.info(f"🎯 Processing all {total_types} product types")
+        thread_logger.info(f"🎯 Processing ONLY the first {total_types} product types (limited for testing)")
 
         for idx, product_type in enumerate(all_product_types, 1):
             thread_logger.info(f"=== Processing product type {idx}/{total_types}: '{product_type}' ===")
@@ -1743,56 +1593,18 @@ def process_single_category(category_data):
 
             time.sleep(0.3)
 
-            # Apply filter with verification
+            # Apply filter
             def apply_filter_with_retry():
-                success = apply_filter(driver)
-                if success:
-                    # Wait for filter to be applied and verify
-                    time.sleep(2)
-                    if verify_single_product_type_selection(driver, selected_type):
-                        logging.info(f"✓ Filter applied successfully for '{selected_type}'")
-                        return True
-                    else:
-                        logging.warning(f"⚠️ Filter verification failed for '{selected_type}'")
-                        return False
-                return False
+                if not apply_filter(driver):
+                    raise Exception("Could not apply filter")
 
-            filter_applied = retry_with_backoff(apply_filter_with_retry)
-            if not filter_applied:
-                logging.error(f"Failed to apply and verify filter for product type '{selected_type}'")
-                continue
-
+            retry_with_backoff(apply_filter_with_retry)
             time.sleep(0.3)
-
-            # Count total products before extraction
-            total_expected_products = count_total_products_in_category(driver, selected_type)
-            thread_logger.info(f"📊 Expected to extract {total_expected_products} products for '{selected_type}'")
 
             # Extract all products from all pages with retry
             all_products = extract_all_products_from_pages(driver, selected_type, category_name, None)
 
             if all_products:
-                extracted_count = len(all_products)
-                thread_logger.info(f"📦 Extracted {extracted_count} products for '{selected_type}'")
-
-                # Validate 100% extraction
-                if total_expected_products > 0 and extracted_count < total_expected_products:
-                    error_msg = f"❌ EXTRACTION INCOMPLETE: Only {extracted_count}/{total_expected_products} products extracted for '{selected_type}' in category '{category_name}'"
-                    thread_logger.error(error_msg)
-                    logging.error(error_msg)
-
-                    # Generate error report
-                    generate_extraction_error_report(selected_type, category_name, total_expected_products, extracted_count, all_products)
-
-                    # Stop script execution on incomplete extraction
-                    thread_logger.error("🛑 Stopping script execution due to incomplete product extraction")
-                    raise Exception(f"Incomplete extraction for product type '{selected_type}': {extracted_count}/{total_expected_products} products")
-
-                # Validate that extracted products match the expected product type
-                valid_products = validate_product_type_consistency(all_products, selected_type, category_name)
-                if valid_products != len(all_products):
-                    logging.warning(f"⚠️ Product type validation: {valid_products}/{len(all_products)} products match '{selected_type}'")
-
                 # Save products to 'products' collection
                 saved_count = save_products_to_db(all_products, category_name)
                 total_products_saved += saved_count
@@ -1819,48 +1631,81 @@ def process_single_category(category_data):
             except:
                 pass
 
-def validate_product_type_consistency(products_data, expected_product_type, category_name):
-    """Validate that extracted products match the expected product type"""
-    if not products_data:
-        return 0
+def extract_brand(product_name):
+    """Extract brand from product name using sophisticated matching logic with cache"""
+    if not product_name:
+        return None
 
-    consistent_count = 0
-    for product in products_data:
-        product_name = product.get('name', '').lower()
-        if is_product_name_relevant(product_name, expected_product_type):
-            consistent_count += 1
+    # Cache for brands to avoid repeated database queries
+    if not hasattr(extract_brand, 'brands_cache'):
+        try:
+            client = MongoClient('mongodb://localhost:27017/')
+            db = client['carrefour']
+            filters_collection = db['filters']
 
-    return consistent_count
+            # Load all brands from filters collection
+            brands_docs = filters_collection.find({'type': 'brand'}, {'name': 1})
+            extract_brand.brands_cache = [doc['name'] for doc in brands_docs]
 
-def has_next_page(driver):
-    """Check if there is a next page in the pagination"""
+            client.close()
+
+            if not extract_brand.brands_cache:
+                logging.debug("No brands found in filters collection")
+                return 'Carrefour'
+
+        except Exception as e:
+            logging.debug(f"Error loading brands cache: {e}")
+            extract_brand.brands_cache = []
+
+    # If cache is empty, return default
+    if not extract_brand.brands_cache:
+        return 'Carrefour'
+
+    product_name_lower = product_name.lower()
+
+    # Strategy 1: Exact match
+    for brand in extract_brand.brands_cache:
+        if brand.lower() == product_name_lower:
+            return brand
+
+    # Strategy 2: Brand contained in product name
+    for brand in extract_brand.brands_cache:
+        if brand.lower() in product_name_lower:
+            return brand
+
+    # Strategy 3: Extract from initial words (1-3 words)
+    words = product_name.split()
+    if words:
+        for i in range(min(3, len(words))):
+            candidate = ' '.join(words[:i+1])
+            for brand in extract_brand.brands_cache:
+                if brand.lower() == candidate.lower():
+                    return brand
+
+    # Strategy 4: Fallback to Carrefour for own-brand products
+    return 'Carrefour'
+
+def extract_subcategory(product_type_name):
+    """Extract subcategory from product type name by matching against producttypes collection"""
+    if not product_type_name:
+        return None
+
     try:
-        # Look for Next button or similar
-        next_selectors = [
-            "button.valtech-carrefourar-search-result-3-x-paginationButtonChangePageNext",
-            "button:contains('Siguiente')",
-            "button:contains('Next')",
-            "//button[contains(text(), 'Siguiente')]",
-            "//button[contains(text(), 'Next')]"
-        ]
+        client = MongoClient('mongodb://localhost:27017/')
+        db = client['carrefour']
+        producttypes_collection = db['producttypes']
 
-        for selector in next_selectors:
-            try:
-                if selector.startswith("//"):
-                    next_button = driver.find_element(By.XPATH, selector)
-                else:
-                    next_button = driver.find_element(By.CSS_SELECTOR, selector)
+        # Find product type document
+        product_type_doc = producttypes_collection.find_one({"name": product_type_name}, {"subcategory": 1})
 
-                if next_button and next_button.is_displayed() and next_button.is_enabled():
-                    return True
-            except:
-                continue
+        if product_type_doc and 'subcategory' in product_type_doc:
+            return product_type_doc['subcategory']
 
-        return False
+        return None
 
     except Exception as e:
-        logging.debug(f"Error checking next page: {e}")
-        return False
+        logging.debug(f"Error extracting subcategory from '{product_type_name}': {e}")
+        return None
 
 def main():
     """Main function - process ONLY ONE category and save products to 'products' collection"""

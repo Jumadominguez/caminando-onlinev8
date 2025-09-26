@@ -1,0 +1,27 @@
+=== EXTRACTION ERROR REPORT ===
+
+Timestamp: 2025-09-26 15:41:02
+Product Type: Adaptador USB
+Category: Electro y tecnología
+Expected Products: 21
+Extracted Products: 16
+Missing Products: 5
+Extraction Rate: 76.2%
+
+=== EXTRACTED PRODUCTS SUMMARY ===
+Total products in extraction data: 16
+
+Sample extracted products:
+  1. Adaptador USB AC1300 Nano Wireless MU-MIMO - N/A
+  2. Playst Link USB Adapter PS5 CFI-ZWA2L - N/A
+  3. Cable Adaptador Usb 3.0 A Sata 2.5 Gadnic AD21V Disco Duro Unidad de Estado Sólido - N/A
+  4. Adaptador USB-c 4 Puertos USB 3.0 Gadnic SYUE7 Multidispositivos - N/A
+  5. Adaptador Usb Gadnic Usb 3.0 Tipo C PC o Mac - N/A
+  ... and 11 more products
+
+=== RECOMMENDATIONS ===
+1. Check pagination logic - may be missing pages
+2. Verify filter application - product type filter may not be working
+3. Check for dynamic content loading issues
+4. Review anti-detection measures - site may be blocking requests
+5. Consider increasing wait times between requests

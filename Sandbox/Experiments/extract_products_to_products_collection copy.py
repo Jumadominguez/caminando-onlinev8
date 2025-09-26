@@ -10,6 +10,7 @@ import json
 import os
 import random
 import re
+import threading
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.firefox.service import Service
@@ -43,6 +44,12 @@ def random_delay():
 # Retry configuration
 MAX_RETRIES = 3
 BASE_RETRY_DELAY = 5  # Base delay in seconds for exponential backoff
+
+# Global tracking lists for final report
+successful_types = []
+partial_types = []
+failed_types = []
+tracking_lock = threading.Lock()
 
 def retry_with_backoff(func, max_retries=MAX_RETRIES, base_delay=BASE_RETRY_DELAY, *args, **kwargs):
     """Execute a function with exponential backoff retry logic"""
@@ -1088,71 +1095,58 @@ def get_total_pages(driver):
         return 1
 
 def navigate_to_page(driver, page_number):
-    """Navigate to a specific page by clicking the page button or using Next button"""
+    """Navigate to a specific page by clicking the page button or using Next button - IMPROVED FOR CARREFOUR"""
     try:
         if page_number == 1:
             logging.info("Already on page 1")
             return True
 
-        # First, try to find the specific page button
-        try:
-            # Find pagination container
-            pagination_selectors = [
-                "div.valtech-carrefourar-search-result-3-x-paginationContainer",
-                "div.flex.justify-center.items-center.ma6",
-                ".paginationContainer",
-                "[class*='pagination']"
-            ]
+        logging.info(f"Attempting to navigate to page {page_number}")
 
-            pagination_container = None
-            for selector in pagination_selectors:
-                try:
-                    pagination_container = driver.find_element(By.CSS_SELECTOR, selector)
-                    if pagination_container and pagination_container.is_displayed():
-                        break
-                except:
-                    continue
+        # Wait a bit for page to stabilize
+        time.sleep(1)
 
-            if pagination_container:
-                # Try to find the specific page button
-                page_button = pagination_container.find_element(By.CSS_SELECTOR, f"button[value='{page_number}']")
-                if page_button and page_button.is_displayed():
-                    # Scroll to and click the page button
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", page_button)
-                    time.sleep(0.5)
+        # Strategy 1: Try to click the specific page number button
+        if page_number > 1:
+            try:
+                # Find the page button container and click the button inside
+                page_button_containers = driver.find_elements(By.CSS_SELECTOR, f"div.valtech-carrefourar-search-result-3-x-paginationButtonPages button[value='{page_number}']")
 
-                    # Wait until the button is clickable
-                    WebDriverWait(driver, 5).until(EC.element_to_be_clickable(page_button))
+                for container in page_button_containers:
+                    try:
+                        button = container
+                        if button and button.is_displayed() and button.is_enabled():
+                            # Scroll to the button
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+                            time.sleep(0.5)
 
-                    driver.execute_script("arguments[0].click();", page_button)
-                    time.sleep(0.5)
-                    return True
-        except:
-            pass
+                            # Click the button
+                            driver.execute_script("arguments[0].click();", button)
+                            time.sleep(2)  # Wait for page to load
 
-        # Fallback: Use Next button to navigate page by page
-        # This is more reliable when there are many pages
-        current_page = 1  # Assume we're starting from page 1 or know current page
+                            logging.info(f"Successfully clicked page {page_number} button")
+                            return True
+                    except Exception as e:
+                        logging.debug(f"Error clicking page {page_number} button: {e}")
+                        continue
+
+            except Exception as e:
+                logging.debug(f"Error in strategy 1: {e}")
+
+        # Strategy 2: Use Next button to navigate page by page (more reliable)
+        current_page = 1  # Assume we're starting from page 1 or can determine current page
 
         while current_page < page_number:
             try:
-                # Find Next button
-                next_selectors = [
-                    "button.valtech-carrefourar-search-result-3-x-paginationButtonChangePageNext",
-                    "button:contains('Siguiente')",
-                    "button:contains('Next')",
-                    "//button[contains(text(), 'Siguiente')]",
-                    "//button[contains(text(), 'Next')]"
-                ]
+                # Find the Next button container
+                next_button_containers = driver.find_elements(By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-paginationButtonChangePageNext")
 
                 next_button = None
-                for selector in next_selectors:
+                for container in next_button_containers:
                     try:
-                        if selector.startswith("//"):
-                            next_button = driver.find_element(By.XPATH, selector)
-                        else:
-                            next_button = driver.find_element(By.CSS_SELECTOR, selector)
-                        if next_button and next_button.is_displayed() and next_button.is_enabled():
+                        button = container.find_element(By.TAG_NAME, "button")
+                        if button and button.is_displayed() and not button.get_attribute("disabled"):
+                            next_button = button
                             break
                     except:
                         continue
@@ -1161,14 +1155,21 @@ def navigate_to_page(driver, page_number):
                     logging.error(f"Next button not found or not clickable at page {current_page}")
                     return False
 
-                # Click Next button
+                # Scroll to and click Next button
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
                 time.sleep(0.5)
                 driver.execute_script("arguments[0].click();", next_button)
+
                 current_page += 1
-                time.sleep(0.5)
+                time.sleep(2)  # Wait for page to load
+
+                logging.info(f"Successfully navigated to page {current_page} using Next button")
+
+                if current_page == page_number:
+                    return True
 
             except Exception as e:
+                logging.error(f"Error navigating to page {current_page + 1}: {e}")
                 return False
 
         return True
@@ -1534,7 +1535,7 @@ def generate_extraction_error_report(product_type_name, category_name, expected_
         return None
 
 def extract_all_products_from_pages(driver, product_type_name, category_name, subcategory_name=None):
-    """Extract products from all pages for a product type"""
+    """Extract products from all pages for a product type - IMPROVED VERSION"""
     try:
         all_products = []
 
@@ -1580,11 +1581,37 @@ def extract_all_products_from_pages(driver, product_type_name, category_name, su
 
             # Try to navigate to next page
             current_page += 1
+            logging.info(f"Attempting to navigate to page {current_page}")
+
             if not navigate_to_page(driver, current_page):
                 logging.error(f"Failed to navigate to page {current_page}")
                 break
 
+            # Wait for the page to load and verify we're on the correct page
+            time.sleep(3)  # Increased wait time
+
+            # Verify we're on the correct page by checking if page button is active
+            try:
+                active_page_buttons = driver.find_elements(By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-paginationButtonActive button")
+                if active_page_buttons:
+                    active_page_value = active_page_buttons[0].get_attribute("value")
+                    if active_page_value and int(active_page_value) == current_page:
+                        logging.info(f"Confirmed: now on page {current_page}")
+                    else:
+                        logging.warning(f"Page verification failed: expected page {current_page}, found active page {active_page_value}")
+            except Exception as e:
+                logging.debug(f"Could not verify page number: {e}")
+
         logging.info(f"Extraction completed: {len(all_products)} products extracted from {current_page} pages")
+
+        # Log extraction completion (don't raise exception anymore - let caller handle it)
+        if total_expected and len(all_products) < total_expected:
+            error_msg = f"⚠️ EXTRACTION INCOMPLETE: Only {len(all_products)}/{total_expected} products extracted for '{product_type_name}'"
+            logging.warning(error_msg)
+
+            # Still generate error report for debugging
+            generate_extraction_error_report(product_type_name, category_name, total_expected, len(all_products), all_products)
+
         return all_products
 
     except Exception as e:
@@ -1643,6 +1670,75 @@ def save_products_to_db(products, category_name):
         logging.error(f"Error saving products to database: {e}")
         return 0
 
+def generate_final_report(successful_types, partial_types, failed_types, category_name):
+    """Generate a comprehensive final report of the extraction process"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_filename = f"extraction_report_{category_name}_{timestamp}.txt"
+
+        with open(report_filename, 'w', encoding='utf-8') as f:
+            f.write("=" * 80 + "\n")
+            f.write(f"REPORTE FINAL DE EXTRACCIÓN - {category_name.upper()}\n")
+            f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 80 + "\n\n")
+
+            # Summary
+            total_types = len(successful_types) + len(partial_types) + len(failed_types)
+            f.write("RESUMEN GENERAL:\n")
+            f.write(f"- Total de tipos de producto procesados: {total_types}\n")
+            f.write(f"- Tipos procesados al 100%: {len(successful_types)}\n")
+            f.write(f"- Tipos procesados con problemas: {len(partial_types)}\n")
+            f.write(f"- Tipos que fallaron completamente: {len(failed_types)}\n\n")
+
+            # Successful types
+            f.write("✅ TIPOS DE PRODUCTO REGISTRADOS AL 100%:\n")
+            if successful_types:
+                for item in successful_types:
+                    f.write(f"  - {item['type']}: {item['products']} productos\n")
+            else:
+                f.write("  (Ninguno)\n")
+            f.write("\n")
+
+            # Partial types
+            f.write("⚠️ TIPOS DE PRODUCTO CON PROBLEMAS:\n")
+            if partial_types:
+                for item in partial_types:
+                    f.write(f"  - {item['type']}:\n")
+                    f.write(f"    Esperados: {item['expected']}, Extraídos: {item['extracted']}, Válidos: {item['valid']}\n")
+                    f.write(f"    Problemas: {', '.join(item['issues'])}\n")
+            else:
+                f.write("  (Ninguno)\n")
+            f.write("\n")
+
+            # Failed types
+            f.write("❌ TIPOS DE PRODUCTO QUE FALLARON:\n")
+            if failed_types:
+                for item in failed_types:
+                    f.write(f"  - {item['type']}: {item['reason']}\n")
+            else:
+                f.write("  (Ninguno)\n")
+            f.write("\n")
+
+            f.write("=" * 80 + "\n")
+            f.write("FIN DEL REPORTE\n")
+            f.write("=" * 80 + "\n")
+
+        logging.warning(f"📄 Reporte final generado: {report_filename}")
+        print(f"\n📄 Reporte final generado: {report_filename}")
+
+        # Also print summary to console
+        print("\n" + "=" * 60)
+        print(f"RESUMEN FINAL - {category_name.upper()}")
+        print("=" * 60)
+        print(f"Total tipos procesados: {total_types}")
+        print(f"✅ Completos (100%): {len(successful_types)}")
+        print(f"⚠️ Parciales: {len(partial_types)}")
+        print(f"❌ Fallidos: {len(failed_types)}")
+        print("=" * 60)
+
+    except Exception as e:
+        logging.error(f"Error generating final report: {e}")
+
 def process_single_category(category_data):
     """Process a single category with its own browser instance - MODIFIED TO SAVE TO PRODUCTS COLLECTION"""
     category_idx, category = category_data
@@ -1652,6 +1748,11 @@ def process_single_category(category_data):
     # Create unique logger for this thread
     thread_logger = logging.getLogger(f"Thread-{category_idx}")
     thread_logger.setLevel(logging.INFO)
+
+    # Initialize tracking dictionaries for final report
+    local_successful_types = []  # Types processed at 100%
+    local_partial_types = []     # Types with some issues
+    local_failed_types = []      # Types that completely failed
 
     # Create separate driver for this category
     user_agent = get_random_user_agent()
@@ -1714,12 +1815,13 @@ def process_single_category(category_data):
 
         logging.warning(f"Found {len(all_product_types)} product types")
 
-        # Process all product types
+        # Process all product types from the beginning
         total_types = len(all_product_types)
         total_products_saved = 0
 
-        thread_logger.info(f"🎯 Processing all {total_types} product types")
+        thread_logger.info(f"🎯 Processing all product types from the beginning")
 
+        # Process all product types starting from the first one
         for idx, product_type in enumerate(all_product_types, 1):
             thread_logger.info(f"=== Processing product type {idx}/{total_types}: '{product_type}' ===")
 
@@ -1739,6 +1841,10 @@ def process_single_category(category_data):
 
             selected_type = retry_with_backoff(select_product_type_with_retry)
             if not selected_type:
+                failed_types.append({
+                    'type': product_type,
+                    'reason': 'Could not select product type after retries'
+                })
                 continue
 
             time.sleep(0.3)
@@ -1760,6 +1866,12 @@ def process_single_category(category_data):
             filter_applied = retry_with_backoff(apply_filter_with_retry)
             if not filter_applied:
                 logging.error(f"Failed to apply and verify filter for product type '{selected_type}'")
+                failed_types.append({
+                    'type': product_type,
+                    'reason': 'Failed to apply and verify filter after retries'
+                })
+                clear_all_selected_filters(driver)
+                time.sleep(0.3)
                 continue
 
             time.sleep(0.3)
@@ -1768,43 +1880,93 @@ def process_single_category(category_data):
             total_expected_products = count_total_products_in_category(driver, selected_type)
             thread_logger.info(f"📊 Expected to extract {total_expected_products} products for '{selected_type}'")
 
+            # VALIDATION: Check if too many products (more than 3000)
+            if total_expected_products > 3000:
+                logging.warning(f"⚠️ Too many products ({total_expected_products}) for '{selected_type}' - skipping")
+                failed_types.append({
+                    'type': product_type,
+                    'reason': f'Too many products ({total_expected_products} > 3000)'
+                })
+                clear_all_selected_filters(driver)
+                time.sleep(0.3)
+                continue
+
+            # VALIDATION: Check if no products filtered (would get all category products)
+            if total_expected_products == 0:
+                logging.warning(f"⚠️ No products found for '{selected_type}' - skipping to avoid processing entire category")
+                failed_types.append({
+                    'type': product_type,
+                    'reason': 'No products filtered (would process entire category)'
+                })
+                clear_all_selected_filters(driver)
+                time.sleep(0.3)
+                continue
+
             # Extract all products from all pages with retry
-            all_products = extract_all_products_from_pages(driver, selected_type, category_name, None)
+            try:
+                all_products = extract_all_products_from_pages(driver, selected_type, category_name, None)
 
-            if all_products:
-                extracted_count = len(all_products)
-                thread_logger.info(f"📦 Extracted {extracted_count} products for '{selected_type}'")
+                if all_products:
+                    extracted_count = len(all_products)
+                    thread_logger.info(f"📦 Successfully extracted {extracted_count} products for '{selected_type}'")
 
-                # Validate 100% extraction
-                if total_expected_products > 0 and extracted_count < total_expected_products:
-                    error_msg = f"❌ EXTRACTION INCOMPLETE: Only {extracted_count}/{total_expected_products} products extracted for '{selected_type}' in category '{category_name}'"
-                    thread_logger.error(error_msg)
-                    logging.error(error_msg)
+                    # Validate that extracted products match the expected product type
+                    valid_products = validate_product_type_consistency(all_products, selected_type, category_name)
 
-                    # Generate error report
-                    generate_extraction_error_report(selected_type, category_name, total_expected_products, extracted_count, all_products)
+                    # Save products to 'products' collection
+                    saved_count = save_products_to_db(all_products, category_name)
+                    total_products_saved += saved_count
+                    logging.warning(f"Saved {saved_count} products for '{selected_type}'")
 
-                    # Stop script execution on incomplete extraction
-                    thread_logger.error("🛑 Stopping script execution due to incomplete product extraction")
-                    raise Exception(f"Incomplete extraction for product type '{selected_type}': {extracted_count}/{total_expected_products} products")
+                    # Determine success level
+                    if extracted_count == total_expected_products and valid_products == extracted_count:
+                        # 100% success
+                        local_successful_types.append({
+                            'type': product_type,
+                            'products': extracted_count
+                        })
+                    else:
+                        # Partial success - track missing products
+                        missing_products = []
+                        if extracted_count < total_expected_products:
+                            missing_products.append(f"{total_expected_products - extracted_count} products not extracted")
+                        if valid_products < extracted_count:
+                            missing_products.append(f"{extracted_count - valid_products} products don't match type")
 
-                # Validate that extracted products match the expected product type
-                valid_products = validate_product_type_consistency(all_products, selected_type, category_name)
-                if valid_products != len(all_products):
-                    logging.warning(f"⚠️ Product type validation: {valid_products}/{len(all_products)} products match '{selected_type}'")
+                        local_partial_types.append({
+                            'type': product_type,
+                            'expected': total_expected_products,
+                            'extracted': extracted_count,
+                            'valid': valid_products,
+                            'issues': missing_products
+                        })
+                else:
+                    logging.warning(f"No products extracted for '{selected_type}'")
+                    local_failed_types.append({
+                        'type': product_type,
+                        'reason': 'No products extracted'
+                    })
 
-                # Save products to 'products' collection
-                saved_count = save_products_to_db(all_products, category_name)
-                total_products_saved += saved_count
-                logging.warning(f"Saved {saved_count} products for '{selected_type}'")
-            else:
-                logging.warning(f"No products for '{selected_type}'")
+            except Exception as e:
+                error_msg = str(e)
+                logging.error(f"Failed to extract products for '{selected_type}': {error_msg}")
+                local_failed_types.append({
+                    'type': product_type,
+                    'reason': f'Extraction failed: {error_msg}'
+                })
 
             # Quick cleanup for next iteration
             clear_all_selected_filters(driver)
             time.sleep(0.3)
 
         logging.warning(f"Category '{category_name}' completed - {total_products_saved} total products saved")
+
+        # Update global tracking lists
+        with tracking_lock:
+            successful_types.extend(local_successful_types)
+            partial_types.extend(local_partial_types)
+            failed_types.extend(local_failed_types)
+
         return True
 
     except Exception as e:
@@ -1833,29 +1995,73 @@ def validate_product_type_consistency(products_data, expected_product_type, cate
     return consistent_count
 
 def has_next_page(driver):
-    """Check if there is a next page in the pagination"""
+    """Check if there is a next page in the pagination - IMPROVED VERSION FOR CARREFOUR"""
     try:
-        # Look for Next button or similar
-        next_selectors = [
-            "button.valtech-carrefourar-search-result-3-x-paginationButtonChangePageNext",
-            "button:contains('Siguiente')",
-            "button:contains('Next')",
-            "//button[contains(text(), 'Siguiente')]",
-            "//button[contains(text(), 'Next')]"
-        ]
+        # Strategy 1: Look for enabled "Siguiente" button
+        try:
+            # Look for the specific Next button container and check if the button inside is not disabled
+            next_button_containers = driver.find_elements(By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-paginationButtonChangePageNext")
+            for container in next_button_containers:
+                try:
+                    button = container.find_element(By.TAG_NAME, "button")
+                    if button and not button.get_attribute("disabled"):
+                        logging.debug("Found enabled 'Siguiente' button")
+                        return True
+                except:
+                    continue
+        except:
+            pass
 
-        for selector in next_selectors:
-            try:
-                if selector.startswith("//"):
-                    next_button = driver.find_element(By.XPATH, selector)
-                else:
-                    next_button = driver.find_element(By.CSS_SELECTOR, selector)
+        # Strategy 2: Check for page number buttons beyond the current page
+        try:
+            # Find all page number buttons
+            page_buttons = driver.find_elements(By.CSS_SELECTOR, "div.valtech-carrefourar-search-result-3-x-paginationButtonPages button[value]")
 
-                if next_button and next_button.is_displayed() and next_button.is_enabled():
-                    return True
-            except:
-                continue
+            current_page = None
+            max_page = 1
 
+            for btn in page_buttons:
+                try:
+                    page_num = int(btn.get_attribute("value"))
+                    max_page = max(max_page, page_num)
+
+                    # Check if this button has the active class
+                    parent_div = btn.find_element(By.XPATH, "..")  # Get parent div
+                    if "valtech-carrefourar-search-result-3-x-paginationButtonActive" in parent_div.get_attribute("class"):
+                        current_page = page_num
+                        logging.debug(f"Found current active page: {current_page}")
+                    elif current_page is not None and page_num > current_page and btn.is_enabled():
+                        logging.debug(f"Found next page button: {page_num}")
+                        return True
+
+                except:
+                    continue
+
+            # If we have more than one page, check if current page is not the last
+            if current_page is not None and max_page > current_page:
+                logging.debug(f"Current page {current_page} < max page {max_page}, more pages available")
+                return True
+
+        except Exception as e:
+            logging.debug(f"Error in strategy 2: {e}")
+
+        # Strategy 3: Check if there are any page buttons with value > 1
+        try:
+            page_buttons = driver.find_elements(By.CSS_SELECTOR, "button[value]")
+            for btn in page_buttons:
+                try:
+                    value = btn.get_attribute("value")
+                    if value and value.isdigit():
+                        page_num = int(value)
+                        if page_num > 1:
+                            logging.debug(f"Found page button with value > 1: {page_num}")
+                            return True
+                except:
+                    continue
+        except:
+            pass
+
+        logging.debug("No next page indicators found")
         return False
 
     except Exception as e:
@@ -1863,7 +2069,7 @@ def has_next_page(driver):
         return False
 
 def main():
-    """Main function - process ONLY ONE category and save products to 'products' collection"""
+    """Main function - process all categories in batches of 3 simultaneously"""
     try:
         logging.warning("Starting product extraction to 'products' collection")
         logging.warning(f"Random delays: {MIN_DELAY}-{MAX_DELAY}s, Retries: {MAX_RETRIES}")
@@ -1873,19 +2079,29 @@ def main():
             logging.error("No categories found")
             return
 
-        # Process only the first category
-        first_category = all_categories[0]
-        category_data = (0, first_category)
+        # Process categories in batches of 3
+        batch_size = 3
+        for i in range(0, len(all_categories), batch_size):
+            batch = all_categories[i:i + batch_size]
+            logging.warning(f"Processing batch {i//batch_size + 1}: {[cat.get('name') for cat in batch]}")
 
-        logging.warning(f"Processing category: {first_category.get('name')}")
+            threads = []
+            for idx, category in enumerate(batch):
+                category_data = (i + idx, category)
+                thread = threading.Thread(target=process_single_category, args=(category_data,))
+                threads.append(thread)
+                thread.start()
 
-        # Process the single category
-        success = process_single_category(category_data)
+            # Wait for all threads in the batch to complete
+            for thread in threads:
+                thread.join()
 
-        if success:
-            logging.warning("Category processed successfully - products saved to 'products' collection")
-        else:
-            logging.error("Category processing failed")
+            logging.warning(f"Batch {i//batch_size + 1} completed")
+
+        # Generate final report after all batches
+        generate_final_report(successful_types, partial_types, failed_types, "ALL_CATEGORIES")
+
+        logging.warning("All categories processed - final report generated")
 
     except Exception as e:
         logging.error(f"Error en main: {e}")
